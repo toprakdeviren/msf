@@ -1,0 +1,128 @@
+/**
+ * ast_nodes.def — Single source of truth for ALL AST node kinds.
+ *
+ * Format:
+ *   AST_NODE(EnumName, display_name, category)
+ *
+ * Categories: DECL, STMT, EXPR, TYPE, PATTERN, META
+ *
+ * The enum values in include/msf.h and the display name table in
+ * src/ast/ast.c are derived from this file.  If you add or reorder
+ * entries here, update those two locations to match.
+ */
+
+/* ── Top-level ─────────────────────────────────────────────────────────────── */
+AST_NODE(UNKNOWN,              "unknown",                   META)
+AST_NODE(SOURCE_FILE,          "source_file",               META)
+
+/* ── Declarations ──────────────────────────────────────────────────────────── */
+AST_NODE(FUNC_DECL,            "func_decl",                 DECL)
+AST_NODE(VAR_DECL,             "var_decl",                  DECL)
+AST_NODE(LET_DECL,             "var_decl",                  DECL)   /* swiftc: let = var_decl */
+AST_NODE(CLASS_DECL,           "class_decl",                DECL)
+AST_NODE(STRUCT_DECL,          "struct_decl",               DECL)
+AST_NODE(ENUM_DECL,            "enum_decl",                 DECL)
+AST_NODE(PROTOCOL_DECL,        "protocol_decl",             DECL)
+AST_NODE(EXTENSION_DECL,       "extension_decl",            DECL)
+AST_NODE(IMPORT_DECL,          "import_decl",               DECL)
+AST_NODE(TYPEALIAS_DECL,       "typealias_decl",            DECL)
+AST_NODE(INIT_DECL,            "constructor_decl",          DECL)   /* swiftc name */
+AST_NODE(DEINIT_DECL,          "destructor_decl",           DECL)   /* swiftc name */
+AST_NODE(ACTOR_DECL,           "actor_decl",                DECL)
+AST_NODE(PARAM,                "parameter",                 DECL)
+AST_NODE(ATTRIBUTE,            "attribute",                 DECL)
+AST_NODE(OWNERSHIP_SPEC,       "ownership_spec",            META)
+AST_NODE(THROWS_CLAUSE,        "throws_clause",             META)
+AST_NODE(ACCESSOR_DECL,        "accessor_decl",             DECL)
+AST_NODE(GENERIC_PARAM,        "generic_param",             DECL)
+AST_NODE(WHERE_CLAUSE,         "where_clause",              DECL)
+AST_NODE(PROTOCOL_REQ,         "protocol_requirement",      DECL)
+AST_NODE(CONFORMANCE,          "conformance",               DECL)
+AST_NODE(ENUM_CASE_DECL,       "enum_case_decl",            DECL)
+AST_NODE(ENUM_ELEMENT_DECL,    "enum_element_decl",         DECL)
+AST_NODE(SUBSCRIPT_DECL,       "subscript_decl",            DECL)
+
+/* ── Precedence groups & operator declarations ─────────────────────────────── */
+AST_NODE(PRECEDENCE_GROUP_DECL,"precedence_group_decl",     DECL)
+AST_NODE(OPERATOR_DECL,        "operator_decl",             DECL)   /* prefix/postfix/infix operator */
+AST_NODE(PG_HIGHER_THAN,       "pg_higher_than",            META)
+AST_NODE(PG_LOWER_THAN,        "pg_lower_than",             META)
+AST_NODE(PG_ASSOCIATIVITY,     "pg_associativity",          META)
+AST_NODE(PG_ASSIGNMENT,        "pg_assignment",             META)
+AST_NODE(PG_GROUP_REF,         "pg_group_ref",              META)
+
+/* ── Statements ────────────────────────────────────────────────────────────── */
+AST_NODE(RETURN_STMT,          "return_stmt",               STMT)
+AST_NODE(THROW_STMT,           "throw_stmt",                STMT)
+AST_NODE(IF_STMT,              "if_stmt",                   STMT)
+AST_NODE(GUARD_STMT,           "guard_stmt",                STMT)
+AST_NODE(FOR_STMT,             "for_each_stmt",             STMT)   /* swiftc name */
+AST_NODE(WHILE_STMT,           "while_stmt",                STMT)
+AST_NODE(REPEAT_STMT,          "repeat_while_stmt",         STMT)   /* swiftc name */
+AST_NODE(DO_STMT,              "do_catch_stmt",             STMT)   /* swiftc name */
+AST_NODE(SWITCH_STMT,          "switch_stmt",               STMT)
+AST_NODE(CASE_CLAUSE,          "case_stmt",                 STMT)   /* swiftc name */
+AST_NODE(BREAK_STMT,           "break_stmt",                STMT)
+AST_NODE(CONTINUE_STMT,        "continue_stmt",             STMT)
+AST_NODE(FALLTHROUGH_STMT,     "fallthrough_stmt",          STMT)
+AST_NODE(DEFER_STMT,           "defer_stmt",                STMT)
+AST_NODE(DISCARD_STMT,         "discard_stmt",              STMT)   /* Swift 5.9 */
+AST_NODE(EXPR_STMT,            "expr_stmt",                 STMT)
+AST_NODE(BLOCK,                "brace_stmt",                STMT)   /* swiftc name */
+
+/* ── Expressions ───────────────────────────────────────────────────────────── */
+AST_NODE(IDENT_EXPR,           "unresolved_decl_ref_expr",  EXPR)   /* swiftc name */
+AST_NODE(INTEGER_LITERAL,      "integer_literal_expr",      EXPR)
+AST_NODE(FLOAT_LITERAL,        "float_literal_expr",        EXPR)
+AST_NODE(STRING_LITERAL,       "string_literal_expr",       EXPR)
+AST_NODE(REGEX_LITERAL,        "regex_literal_expr",        EXPR)   /* Swift 5.7+ */
+AST_NODE(BOOL_LITERAL,         "boolean_literal_expr",      EXPR)   /* swiftc name */
+AST_NODE(NIL_LITERAL,          "nil_literal_expr",          EXPR)
+AST_NODE(CALL_EXPR,            "call_expr",                 EXPR)
+AST_NODE(MEMBER_EXPR,          "unresolved_dot_expr",       EXPR)   /* swiftc name */
+AST_NODE(SUBSCRIPT_EXPR,       "subscript_expr",            EXPR)
+AST_NODE(BINARY_EXPR,          "binary_expr",               EXPR)
+AST_NODE(UNARY_EXPR,           "prefix_unary_expr",         EXPR)   /* swiftc name */
+AST_NODE(CONSUME_EXPR,         "consume_expr",              EXPR)   /* Swift 5.9 */
+AST_NODE(ASSIGN_EXPR,          "assign_expr",               EXPR)
+AST_NODE(PAREN_EXPR,           "paren_expr",                EXPR)
+AST_NODE(ARRAY_LITERAL,        "array_expr",                EXPR)   /* swiftc name */
+AST_NODE(DICT_LITERAL,         "dictionary_expr",           EXPR)   /* swiftc name */
+AST_NODE(TUPLE_EXPR,           "tuple_expr",                EXPR)
+AST_NODE(CLOSURE_EXPR,         "closure_expr",              EXPR)
+AST_NODE(CLOSURE_CAPTURE,      "closure_capture",           EXPR)
+AST_NODE(TRY_EXPR,             "try_expr",                  EXPR)
+AST_NODE(AWAIT_EXPR,           "await_expr",                EXPR)
+AST_NODE(CAST_EXPR,            "cast_expr",                 EXPR)
+AST_NODE(OPTIONAL_CHAIN,       "optional_chain_expr",       EXPR)   /* swiftc name */
+AST_NODE(FORCE_UNWRAP,         "force_value_expr",          EXPR)   /* swiftc name */
+AST_NODE(TERNARY_EXPR,         "ternary_expr",              EXPR)
+AST_NODE(INOUT_EXPR,           "inout_expr",                EXPR)
+AST_NODE(IF_EXPR,              "if_expr",                   EXPR)
+AST_NODE(CATCH_CLAUSE,         "catch_clause",              EXPR)
+AST_NODE(KEY_PATH_EXPR,        "key_path_expr",             EXPR)   /* \Type.property */
+AST_NODE(MACRO_EXPANSION,      "macro_expansion_expr",      EXPR)
+AST_NODE(AVAILABILITY_EXPR,    "availability_expr",         EXPR)
+
+/* ── Types ─────────────────────────────────────────────────────────────────── */
+AST_NODE(TYPE_IDENT,           "type_ident",                TYPE)
+AST_NODE(TYPE_OPTIONAL,        "type_optional",             TYPE)
+AST_NODE(TYPE_ARRAY,           "type_array",                TYPE)
+AST_NODE(TYPE_DICT,            "type_dict",                 TYPE)
+AST_NODE(TYPE_TUPLE,           "type_tuple",                TYPE)
+AST_NODE(TYPE_FUNC,            "type_function",             TYPE)   /* swiftc name */
+AST_NODE(TYPE_GENERIC,         "type_generic",              TYPE)
+AST_NODE(TYPE_INOUT,           "type_inout",                TYPE)
+AST_NODE(TYPE_SOME,            "type_some",                 TYPE)
+AST_NODE(TYPE_ANY,             "type_any",                  TYPE)
+AST_NODE(TYPE_COMPOSITION,     "type_composition",          TYPE)   /* P & Q */
+
+/* ── Patterns ──────────────────────────────────────────────────────────────── */
+AST_NODE(PATTERN_ENUM,         "pattern_enum",              PATTERN)
+AST_NODE(PATTERN_TUPLE,        "pattern_tuple",             PATTERN)
+AST_NODE(PATTERN_TYPE,         "pattern_type",              PATTERN)
+AST_NODE(PATTERN_GUARD,        "pattern_guard",             PATTERN)
+AST_NODE(PATTERN_RANGE,        "pattern_range",             PATTERN)
+AST_NODE(PATTERN_WILDCARD,     "pattern_any",               PATTERN) /* swiftc name */
+AST_NODE(PATTERN_VALUE_BINDING,"pattern_binding",           PATTERN) /* swiftc name */
+AST_NODE(OPTIONAL_BINDING,     "optional_binding_cond",     PATTERN)
