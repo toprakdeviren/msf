@@ -29,6 +29,12 @@ struct MSFResult {
   TypeArena    type_arena;
   Parser       *parser;
   SemaContext  *sema;
+
+  /* Token streams owned by sub-expression re-parses (msf_parse_expression).
+   * Each TokenStream is heap-allocated; released alongside the result. */
+  TokenStream **sub_ts;
+  size_t        sub_ts_cnt;
+  size_t        sub_ts_cap;
 };
 
 /* ═══════════════════════════════════════════════════════════════════════════════
@@ -91,8 +97,55 @@ void msf_result_free(MSFResult *r) {
   parser_destroy(r->parser);
   type_arena_free(&r->type_arena);
   ast_arena_free(&r->ast_arena);
+  /* Release sub-expression token streams owned by msf_parse_expression. */
+  for (size_t i = 0; i < r->sub_ts_cnt; i++) {
+    token_stream_free(r->sub_ts[i]);
+    free(r->sub_ts[i]);
+  }
+  free(r->sub_ts);
   token_stream_free(&r->ts);
   free(r);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+ * Bare Expression Parsing — §16 backend ABI
+ * ═══════════════════════════════════════════════════════════════════════════════ */
+
+const ASTNode *msf_parse_expression(MSFResult *r, const char *expr_text,
+                                    const Token **out_tokens) {
+  if (!r || !expr_text) return NULL;
+
+  TokenStream *ts = NULL;
+  ASTNode *node = parse_expression_from_cstring_with_tokens(
+      &r->ast_arena, expr_text, &ts);
+  if (!node) {
+    if (ts) {
+      token_stream_free(ts);
+      free(ts);
+    }
+    return NULL;
+  }
+
+  /* Keep the token stream alive for as long as the parent result does. */
+  if (r->sub_ts_cnt == r->sub_ts_cap) {
+    size_t nc = r->sub_ts_cap ? r->sub_ts_cap * 2 : 4;
+    TokenStream **nb = realloc(r->sub_ts, nc * sizeof(*nb));
+    if (!nb) {
+      /* Out of memory: drop the stream, node survives but token_text() on
+       * those tokens will not work — caller should treat NULL out_tokens
+       * as "tokens unavailable". */
+      token_stream_free(ts);
+      free(ts);
+      if (out_tokens) *out_tokens = NULL;
+      return node;
+    }
+    r->sub_ts = nb;
+    r->sub_ts_cap = nc;
+  }
+  r->sub_ts[r->sub_ts_cnt++] = ts;
+
+  if (out_tokens) *out_tokens = ts->tokens;
+  return node;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════════

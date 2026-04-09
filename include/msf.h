@@ -62,6 +62,7 @@
  *   13. Type predicates     — small inline helpers
  *   14. Conformance table   — (type, protocol) records
  *   15. Associated types    — assoc-type bindings
+ *   16. Bare expressions    — re-parse expression strings
  */
 #ifndef MSF_H
 #define MSF_H
@@ -1055,6 +1056,40 @@ const char *assoc_type_table_get(const AssocTypeTable *at,
                                  const char *type_name,
                                  const char *protocol_name,
                                  const char *assoc_name);
+
+/* ┌──────────────────────────────────────────────────────────────────────────┐
+ * │  16. BARE EXPRESSIONS — re-parse expression strings                    │
+ * └──────────────────────────────────────────────────────────────────────────┘
+ *
+ *  String interpolation lowering:
+ *
+ *      "Hello, \(person.name)!"
+ *
+ *  needs a Swift expression parse for the text inside \( … ).  This
+ *  helper parses a bare expression against an already-analyzed
+ *  MSFResult so backends do not have to ship their own parser or spin
+ *  up a fresh MSFResult per interpolation.
+ *
+ *  The returned ASTNode and its token array live inside @p r and are
+ *  released together with @p r by msf_result_free().
+ *
+ *  @code
+ *    const Token *sub_tokens = NULL;
+ *    const ASTNode *e = msf_parse_expression(r, "person.name", &sub_tokens);
+ *    // walk e with sub_tokens for token_text()
+ *  @endcode
+ */
+
+/**
+ * @brief Parses a bare expression string against an analyzed result.
+ * @param r           Analyzed result providing the backing arena.
+ * @param expr_text   NUL-terminated Swift expression.
+ * @param out_tokens  If non-NULL, receives the token array for the
+ *                    sub-expression.  Same lifetime as @p r.
+ * @return            Parsed expression node, or NULL on failure.
+ */
+const ASTNode *msf_parse_expression(MSFResult *r, const char *expr_text,
+                                    const Token **out_tokens);
 
 #ifdef __cplusplus
 }

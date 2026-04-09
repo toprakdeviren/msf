@@ -58,6 +58,22 @@ ASTNode *parse_source_file(Parser *p);
 /** @brief Destroys the parser and frees associated resources. */
 void parser_destroy(Parser *p);
 
+/**
+ * @brief Parses a single expression from a NUL-terminated C string.
+ *
+ * Used by msf_parse_expression() to lower string interpolation
+ * sub-expressions against an already-allocated arena.
+ *
+ * @param arena   Arena for AST node allocation.
+ * @param str     Expression text.
+ * @param out_ts  If non-NULL, receives a heap-allocated TokenStream
+ *                (caller frees with token_stream_free() then free()).
+ * @return        Parsed expression node, or NULL on failure.
+ */
+ASTNode *parse_expression_from_cstring_with_tokens(ASTArena *arena,
+                                                   const char *str,
+                                                   TokenStream **out_ts);
+
 /* — Parser error accessors ------------------------------------------------ */
 
 /** @brief Returns the number of recorded parse errors. */
