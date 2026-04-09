@@ -6,6 +6,20 @@ extern "C" {
 #endif
 
 /**
+ * @file case.h
+ * @brief Unicode case conversion and case-folding APIs.
+ *
+ * All string APIs apply full Unicode mappings, including multi-codepoint
+ * expansions such as `U+00DF LATIN SMALL LETTER SHARP S -> "SS"` in uppercase.
+ *
+ * Locale-sensitive tailoring is intentionally narrow:
+ * - Turkish/Azerbaijani dotted and dotless I rules are supported in
+ *   upper/lower/case-fold locale APIs.
+ * - Greek final sigma is handled in lowercase and titlecase paths.
+ * - Other locale tags currently fall back to the default Unicode mappings.
+ */
+
+/**
  * @brief Converts a Unicode code point to uppercase.
  *
  * @param cp The Unicode code point to convert.
@@ -43,7 +57,8 @@ uint32_t decoder_case_fold(uint32_t cp);
  * @param cp The Unicode code point to convert.
  * @param out Output buffer for the uppercase code point(s).
  * @param capacity Maximum number of code points to write to out.
- * @return The number of code points written to out.
+ * @return The number of code points written to out, or 0 if the mapping does
+ *         not fit in `out`.
  */
 size_t decoder_to_upper_full(uint32_t cp, uint32_t *out, size_t capacity);
 
@@ -53,7 +68,8 @@ size_t decoder_to_upper_full(uint32_t cp, uint32_t *out, size_t capacity);
  * @param cp The Unicode code point to convert.
  * @param out Output buffer for the lowercase code point(s).
  * @param capacity Maximum number of code points to write to out.
- * @return The number of code points written to out.
+ * @return The number of code points written to out, or 0 if the mapping does
+ *         not fit in `out`.
  */
 size_t decoder_to_lower_full(uint32_t cp, uint32_t *out, size_t capacity);
 
@@ -63,7 +79,8 @@ size_t decoder_to_lower_full(uint32_t cp, uint32_t *out, size_t capacity);
  * @param cp The Unicode code point to convert.
  * @param out Output buffer for the title case code point(s).
  * @param capacity Maximum number of code points to write to out.
- * @return The number of code points written to out.
+ * @return The number of code points written to out, or 0 if the mapping does
+ *         not fit in `out`.
  */
 size_t decoder_to_title_full(uint32_t cp, uint32_t *out, size_t capacity);
 
@@ -73,7 +90,8 @@ size_t decoder_to_title_full(uint32_t cp, uint32_t *out, size_t capacity);
  * @param cp The Unicode code point to convert.
  * @param out Output buffer for the case-folded code point(s).
  * @param capacity Maximum number of code points to write to out.
- * @return The number of code points written to out.
+ * @return The number of code points written to out, or 0 if the mapping does
+ *         not fit in `out`.
  */
 size_t decoder_case_fold_full(uint32_t cp, uint32_t *out, size_t capacity);
 
@@ -85,7 +103,7 @@ size_t decoder_case_fold_full(uint32_t cp, uint32_t *out, size_t capacity);
  * @param dst Destination buffer for uppercase code points.
  * @param dst_capacity Capacity of the destination buffer.
  * @param dst_len Output parameter for the number of code points written to dst.
- * @return UNICODE_SUCCESS on success, error code on failure.
+ * @return `DECODER_SUCCESS` on success, error code on failure.
  */
 int decoder_string_to_upper(const uint32_t *src, size_t src_len, uint32_t *dst, size_t dst_capacity,
                             size_t *dst_len);
@@ -98,7 +116,7 @@ int decoder_string_to_upper(const uint32_t *src, size_t src_len, uint32_t *dst, 
  * @param dst Destination buffer for lowercase code points.
  * @param dst_capacity Capacity of the destination buffer.
  * @param dst_len Output parameter for the number of code points written to dst.
- * @return UNICODE_SUCCESS on success, error code on failure.
+ * @return `DECODER_SUCCESS` on success, error code on failure.
  */
 int decoder_string_to_lower(const uint32_t *src, size_t src_len, uint32_t *dst, size_t dst_capacity,
                             size_t *dst_len);
@@ -111,7 +129,7 @@ int decoder_string_to_lower(const uint32_t *src, size_t src_len, uint32_t *dst, 
  * @param dst Destination buffer for title case code points.
  * @param dst_capacity Capacity of the destination buffer.
  * @param dst_len Output parameter for the number of code points written to dst.
- * @return UNICODE_SUCCESS on success, error code on failure.
+ * @return `DECODER_SUCCESS` on success, error code on failure.
  */
 int decoder_string_to_title(const uint32_t *src, size_t src_len, uint32_t *dst, size_t dst_capacity,
                             size_t *dst_len);
@@ -124,7 +142,7 @@ int decoder_string_to_title(const uint32_t *src, size_t src_len, uint32_t *dst, 
  * @param dst Destination buffer for case-folded code points.
  * @param dst_capacity Capacity of the destination buffer.
  * @param dst_len Output parameter for the number of code points written to dst.
- * @return UNICODE_SUCCESS on success, error code on failure.
+ * @return `DECODER_SUCCESS` on success, error code on failure.
  */
 int decoder_string_case_fold(const uint32_t *src, size_t src_len, uint32_t *dst,
                              size_t dst_capacity, size_t *dst_len);
@@ -138,7 +156,7 @@ int decoder_string_case_fold(const uint32_t *src, size_t src_len, uint32_t *dst,
  * @param dst Destination buffer for uppercase code points.
  * @param dst_capacity Capacity of the destination buffer.
  * @param dst_len Output parameter for the number of code points written to dst.
- * @return UNICODE_SUCCESS on success, error code on failure.
+ * @return `DECODER_SUCCESS` on success, error code on failure.
  */
 int decoder_string_to_upper_locale(const uint32_t *src, size_t src_len,
                                    const decoder_locale_t *locale, uint32_t *dst,
@@ -153,7 +171,7 @@ int decoder_string_to_upper_locale(const uint32_t *src, size_t src_len,
  * @param dst Destination buffer for lowercase code points.
  * @param dst_capacity Capacity of the destination buffer.
  * @param dst_len Output parameter for the number of code points written to dst.
- * @return UNICODE_SUCCESS on success, error code on failure.
+ * @return `DECODER_SUCCESS` on success, error code on failure.
  */
 int decoder_string_to_lower_locale(const uint32_t *src, size_t src_len,
                                    const decoder_locale_t *locale, uint32_t *dst,
@@ -169,7 +187,7 @@ int decoder_string_to_lower_locale(const uint32_t *src, size_t src_len,
  * @param dst Destination buffer for case-folded code points.
  * @param dst_capacity Capacity of the destination buffer.
  * @param dst_len Output parameter for the number of code points written to dst.
- * @return UNICODE_SUCCESS on success, error code on failure.
+ * @return `DECODER_SUCCESS` on success, error code on failure.
  */
 int decoder_string_case_fold_locale(const uint32_t *src, size_t src_len,
                                     const decoder_locale_t *locale, uint32_t *dst,
@@ -183,7 +201,7 @@ int decoder_string_case_fold_locale(const uint32_t *src, size_t src_len,
  * @param dst Destination buffer for uppercase UTF-8 bytes.
  * @param dst_capacity Capacity of the destination buffer.
  * @param dst_len Output parameter for the number of bytes written to dst.
- * @return UNICODE_SUCCESS on success, error code on failure.
+ * @return `DECODER_SUCCESS` on success, error code on failure.
  */
 int decoder_utf8_to_upper(const uint8_t *src, size_t src_len, uint8_t *dst, size_t dst_capacity,
                           size_t *dst_len);
@@ -196,7 +214,7 @@ int decoder_utf8_to_upper(const uint8_t *src, size_t src_len, uint8_t *dst, size
  * @param dst Destination buffer for lowercase UTF-8 bytes.
  * @param dst_capacity Capacity of the destination buffer.
  * @param dst_len Output parameter for the number of bytes written to dst.
- * @return UNICODE_SUCCESS on success, error code on failure.
+ * @return `DECODER_SUCCESS` on success, error code on failure.
  */
 int decoder_utf8_to_lower(const uint8_t *src, size_t src_len, uint8_t *dst, size_t dst_capacity,
                           size_t *dst_len);
@@ -209,7 +227,7 @@ int decoder_utf8_to_lower(const uint8_t *src, size_t src_len, uint8_t *dst, size
  * @param dst Destination buffer for case-folded UTF-8 bytes.
  * @param dst_capacity Capacity of the destination buffer.
  * @param dst_len Output parameter for the number of bytes written to dst.
- * @return UNICODE_SUCCESS on success, error code on failure.
+ * @return `DECODER_SUCCESS` on success, error code on failure.
  */
 int decoder_utf8_case_fold(const uint8_t *src, size_t src_len, uint8_t *dst, size_t dst_capacity,
                            size_t *dst_len);

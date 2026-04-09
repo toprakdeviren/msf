@@ -110,7 +110,7 @@ typedef enum {
   /* statements    */ KW_RETURN, KW_IF, KW_ELSE, KW_FOR, KW_WHILE, KW_GUARD,
                       KW_SWITCH, KW_CASE, KW_DEFAULT, KW_BREAK, KW_CONTINUE,
                       KW_FALLTHROUGH, KW_THROW, KW_DO, KW_DEFER, KW_REPEAT,
-  /* expressions   */ KW_RETURN_VAL, KW_TRY, KW_AWAIT, KW_AS, KW_IS, KW_IN,
+  /* expressions   */ KW_TRY, KW_AWAIT, KW_AS, KW_IS, KW_IN,
                       KW_TRUE, KW_FALSE, KW_NIL,
                       KW_SELF, KW_SUPER, KW_SOME, KW_ANY,
   /* modifiers     */ KW_PUBLIC, KW_PRIVATE, KW_INTERNAL, KW_FILEPRIVATE,

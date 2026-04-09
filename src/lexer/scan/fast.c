@@ -39,17 +39,17 @@ uint32_t keyword_detect(const uint8_t *str, uint32_t len) {
     uint32_t mid = lo + (hi - lo) / 2;
     const char *kw = LEX_KEYWORDS[mid].text;
 
-    /* Compare first byte for fast reject, then full memcmp. */
+    /* Compare first byte for fast reject, then proper lexicographic compare. */
     int cmp = (int)str[0] - (int)(unsigned char)kw[0];
     if (cmp == 0) {
-      /* First byte matches — compare full string. */
+      /* First byte matches — compare common prefix, then length. */
       size_t kw_len = strlen(kw);
-      if (len < kw_len)
-        cmp = -1;
-      else if (len > kw_len)
-        cmp = 1;
-      else
-        cmp = memcmp(str, kw, len);
+      size_t min_len = len < kw_len ? len : kw_len;
+      cmp = memcmp(str, kw, min_len);
+      if (cmp == 0) {
+        if (len < kw_len) cmp = -1;
+        else if (len > kw_len) cmp = 1;
+      }
     }
 
     if (cmp < 0)

@@ -213,7 +213,9 @@ bool decoder_is_well_formed(const uint32_t *str, size_t len);
  * @param dst_capacity    Capacity of the destination buffer.
  * @param dst_len         Output: number of code points written to dst.
  * @param errors_removed  Output: number of dangerous code points that were stripped.
- * @return DECODER_SUCCESS on success, or a negative decoder_status_t on error.
+ * @return DECODER_SUCCESS on success, DECODER_ERROR_BUFFER_TOO_SMALL if the
+ *         valid output prefix does not fit in dst, or another negative
+ *         decoder_status_t on error.
  */
 int decoder_sanitize(const uint32_t *src, size_t src_len, uint32_t *dst, size_t dst_capacity,
                      size_t *dst_len, size_t *errors_removed);

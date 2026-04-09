@@ -3,8 +3,11 @@
  * @brief Unicode Normalization (UAX #15) and Decomposition/Composition primitives.
  *
  * Implements the four Unicode Normalization Forms: NFC, NFD, NFKC, NFKD.
- * Provides both UTF-32 and direct UTF-8 interfaces, along with low-level
+ * Provides both UTF-32 and UTF-8 convenience interfaces, along with low-level
  * primitives for decomposition, composition, and combining class queries.
+ *
+ * The UTF-8 entry points are convenience wrappers over the UTF-32 engine: they
+ * decode, normalize, and then re-encode.
  */
 #ifndef DECODER_NORMALIZE_H
 #define DECODER_NORMALIZE_H
@@ -26,7 +29,9 @@ extern "C" {
  * @param dst          Destination buffer for normalized code points.
  * @param dst_capacity Capacity of the destination buffer.
  * @param dst_len      Output: number of code points written to dst.
- * @return DECODER_SUCCESS on success, or a negative decoder_status_t on error.
+ *                     When the function returns `DECODER_ERROR_BUFFER_TOO_SMALL`,
+ *                     `*dst_len` receives the required number of code points.
+ * @return `DECODER_SUCCESS` on success, or a negative `decoder_status_t` on error.
  */
 int decoder_normalize(const uint32_t *src, size_t src_len, decoder_normalization_form_t form,
                       uint32_t *dst, size_t dst_capacity, size_t *dst_len);
@@ -74,11 +79,11 @@ int decoder_normalize_compare(const uint32_t *s1, size_t len1, const uint32_t *s
                               decoder_normalization_form_t form);
 
 /* ═══════════════════════════════════════════════════════════════════════════
- *  Normalization (UTF-8, zero-copy path)
+ *  Normalization (UTF-8 convenience wrappers)
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 /**
- * @brief Normalizes a UTF-8 encoded string directly, without intermediate UTF-32 conversion.
+ * @brief Normalizes a UTF-8 encoded string.
  *
  * @param src          Source UTF-8 bytes.
  * @param src_len      Number of source bytes.
@@ -92,7 +97,7 @@ int decoder_normalize_utf8(const uint8_t *src, size_t src_len, decoder_normaliza
                            uint8_t *dst, size_t dst_capacity, size_t *dst_len);
 
 /**
- * @brief Checks if a UTF-8 encoded string is normalized, without intermediate UTF-32 conversion.
+ * @brief Checks if a UTF-8 encoded string is normalized.
  *
  * @param str   UTF-8 byte sequence.
  * @param len   Number of bytes.
@@ -120,15 +125,16 @@ uint8_t decoder_get_combining_class(uint32_t cp);
  * @brief Checks if a code point is a combining character (CCC > 0 or Category M).
  *
  * @param cp  Unicode code point.
- * @return true if the code point is a combining mark.
+ * @return true if the code point has a non-zero canonical combining class or
+ *         belongs to one of the Unicode mark categories (`Mn`, `Mc`, `Me`).
  */
 bool decoder_is_combining(uint32_t cp);
 
 /**
  * @brief Checks if two code points can be composed into a single code point.
  *
- * Tests whether the canonical composition of (a, b) exists in the
- * Composition Exclusions table (UAX #15, §X5).
+ * Tests whether the canonical composition of `(a, b)` exists and is not
+ * excluded from recomposition.
  *
  * @param a  First code point (typically a starter).
  * @param b  Second code point (typically a combining mark or a starter).
@@ -150,12 +156,13 @@ uint32_t decoder_compose(uint32_t a, uint32_t b);
 /**
  * @brief Performs Canonical Decomposition of a code point.
  *
- * Decomposes recursively until no further canonical decomposition is possible.
+ * Returns the recursive canonical decomposition if one exists.
  *
  * @param cp        Code point to decompose.
  * @param out       Output buffer for the decomposed code points.
  * @param capacity  Maximum number of code points to write.
- * @return Number of code points written to out (1 if the code point has no decomposition).
+ * @return Number of code points written to `out`, or 0 if the code point has
+ *         no canonical decomposition or the buffer is too small.
  *
  * @note Example: decoder_decompose(0x00C1, out, 4) → writes [0x0041, 0x0301], returns 2.
  */
@@ -170,7 +177,8 @@ size_t decoder_decompose(uint32_t cp, uint32_t *out, size_t capacity);
  * @param cp        Code point to decompose.
  * @param out       Output buffer for the decomposed code points.
  * @param capacity  Maximum number of code points to write.
- * @return Number of code points written to out.
+ * @return Number of code points written to `out`, or 0 if no decomposition is
+ *         available or the buffer is too small.
  *
  * @note Example: decoder_decompose_compat(0xFB01, out, 4) → writes [0x0066, 0x0069], returns 2.
  *       (ﬁ ligature → "fi")

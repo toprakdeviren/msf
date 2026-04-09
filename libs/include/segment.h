@@ -66,12 +66,16 @@ bool decoder_is_grapheme_boundary(const uint32_t *str, size_t len, size_t pos);
 /**
  * @brief Finds all grapheme cluster boundary positions in a string.
  *
+ * The output always starts with `0` and ends with `len` when the buffer is
+ * large enough.
+ *
  * @param text            Code point array.
  * @param len             Length of the array.
  * @param boundaries      Output buffer for boundary positions.
  * @param boundaries_cap  Capacity of the output buffer.
  * @param boundaries_len  Output: number of boundaries written.
- * @return DECODER_SUCCESS on success, DECODER_ERROR_BUFFER_TOO_SMALL if buffer is insufficient.
+ * @return DECODER_SUCCESS on success, DECODER_ERROR_INVALID_INPUT for invalid
+ *         arguments, or DECODER_ERROR_BUFFER_TOO_SMALL if only a prefix fits.
  */
 int decoder_find_grapheme_boundaries(const uint32_t *text, size_t len, size_t *boundaries,
                                      size_t boundaries_cap, size_t *boundaries_len);
@@ -108,6 +112,23 @@ size_t decoder_count_words(const uint32_t *str, size_t len);
  */
 bool decoder_is_word_boundary(const uint32_t *str, size_t len, size_t pos);
 
+/**
+ * @brief Finds all word boundary positions in a string.
+ *
+ * The output always starts with `0` and ends with `len` when the buffer is
+ * large enough.
+ *
+ * @param text            Code point array.
+ * @param len             Length of the array.
+ * @param boundaries      Output buffer for boundary positions.
+ * @param boundaries_cap  Capacity of the output buffer.
+ * @param boundaries_len  Output: number of boundaries written.
+ * @return DECODER_SUCCESS on success, DECODER_ERROR_INVALID_INPUT for invalid
+ *         arguments, or DECODER_ERROR_BUFFER_TOO_SMALL if only a prefix fits.
+ */
+int decoder_find_word_boundaries(const uint32_t *text, size_t len, size_t *boundaries,
+                                 size_t boundaries_cap, size_t *boundaries_len);
+
 /* ═══════════════════════════════════════════════════════════════════════════
  *  Sentences (UAX #29, §5)
  * ═══════════════════════════════════════════════════════════════════════════ */
@@ -131,6 +152,23 @@ size_t decoder_count_sentences(const uint32_t *str, size_t len);
  * @brief Checks if a position is a sentence boundary.
  */
 bool decoder_is_sentence_boundary(const uint32_t *str, size_t len, size_t pos);
+
+/**
+ * @brief Finds all sentence boundary positions in a string.
+ *
+ * The output always starts with `0` and ends with `len` when the buffer is
+ * large enough.
+ *
+ * @param text            Code point array.
+ * @param len             Length of the array.
+ * @param boundaries      Output buffer for boundary positions.
+ * @param boundaries_cap  Capacity of the output buffer.
+ * @param boundaries_len  Output: number of boundaries written.
+ * @return DECODER_SUCCESS on success, DECODER_ERROR_INVALID_INPUT for invalid
+ *         arguments, or DECODER_ERROR_BUFFER_TOO_SMALL if only a prefix fits.
+ */
+int decoder_find_sentence_boundaries(const uint32_t *text, size_t len, size_t *boundaries,
+                                     size_t boundaries_cap, size_t *boundaries_len);
 
 /* ═══════════════════════════════════════════════════════════════════════════
  *  Iterators

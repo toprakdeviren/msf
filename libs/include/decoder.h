@@ -295,6 +295,15 @@ bool decoder_utf8_grapheme_iter_next(decoder_utf8_grapheme_iter_t *it,
 void decoder_utf8_grapheme_iter_reset(decoder_utf8_grapheme_iter_t *it);
 
 /**
+ * @brief Free resources associated with a UTF-8 iterator.
+ * Must be called if you initialize an iterator but break out of the loop early,
+ * to prevent leaking the internal arrays.
+ * 
+ * @param it Iterator instance.
+ */
+void decoder_utf8_grapheme_iter_free(decoder_utf8_grapheme_iter_t *it);
+
+/**
  * @brief Count total grapheme clusters in UTF-8 text.
  *
  * Convenience function — iterates internally.

@@ -85,7 +85,8 @@ typedef enum {
     DECODER_ERROR_NOT_IMPLEMENTED = -7,   /**< Feature is not yet implemented. */
     DECODER_ERROR_IO = -8,                /**< I/O error (file operations). */
     DECODER_ERROR_INVALID_ARGUMENT = -9,  /**< Invalid argument value. */
-    DECODER_ERROR_OVERFLOW = -10          /**< Integer overflow during computation. */
+    DECODER_ERROR_OVERFLOW = -10,         /**< Integer overflow during computation. */
+    DECODER_ERROR_NOT_FOUND = -11         /**< Requested item not found. */
 } decoder_status_t;
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -450,7 +451,9 @@ typedef uint16_t decoder_block_t;
  * @brief Locale descriptor for locale-sensitive operations.
  *
  * Pass to functions like decoder_string_to_upper_locale() to enable
- * language-specific case mappings (e.g. Turkish İ/i, Lithuanian dot-above).
+ * language-specific case mappings. Current tailorings cover Turkic dotted and
+ * dotless I rules; unsupported locale tags fall back to default Unicode
+ * mappings.
  * Any field may be NULL to use the default.
  */
 typedef struct {
