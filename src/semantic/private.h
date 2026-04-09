@@ -60,31 +60,14 @@ struct Scope {
 };
 
 /* ┌──────────────────────────────────────────────────────────────────────────┐
- * │  2. CONFORMANCE & ASSOCIATED TYPES                                     │
- * └──────────────────────────────────────────────────────────────────────────┘ */
-
-typedef struct {
-  const char *type_name;
-  const char *protocol_name;
-  const void *where_ast;     /**< AST_WHERE_CLAUSE for conditional conformance. */
-} ConformanceRecord;
-
-typedef struct ConformanceTable {
-  ConformanceRecord entries[CONFORMANCE_TABLE_MAX];
-  uint32_t          count;
-} ConformanceTable;
-
-typedef struct {
-  const char *type_name;
-  const char *protocol_name;
-  const char *assoc_name;
-  const char *concrete_type_name;
-} AssocTypeBinding;
-
-typedef struct {
-  AssocTypeBinding entries[ASSOC_TYPE_TABLE_MAX];
-  uint32_t         count;
-} AssocTypeTable;
+ * │  2. CONFORMANCE & ASSOCIATED TYPES — moved to public msf.h (§14-15)    │
+ * └──────────────────────────────────────────────────────────────────────────┘
+ *
+ *  ConformanceTable, ConformanceRecord, AssocTypeTable, AssocTypeBinding
+ *  and their APIs now live in <msf.h> so backends can read them without
+ *  pulling in sema internals.  Already available here via transitive
+ *  include through internal/sema.h → msf.h.
+ */
 
 /* ┌──────────────────────────────────────────────────────────────────────────┐
  * │  3. ATTRIBUTE REGISTRIES                                               │
@@ -317,25 +300,11 @@ TypeInfo *resolve_call_expr(SemaContext *ctx, ASTNode *node);
 TypeInfo *resolve_member_expr(SemaContext *ctx, ASTNode *node);
 
 /* — Conformance (conformance.c, conformance_table.c) ---------------------- */
+/* conformance_table_* and assoc_type_table_* declared in <msf.h> §14-15. */
 
-void conformance_table_init_builtins(ConformanceTable *ct);
-void conformance_table_add(ConformanceTable *ct, const char *type_name,
-                           const char *protocol_name);
-void conformance_table_add_conditional(ConformanceTable *ct, const char *type_name,
-                                       const char *protocol_name, const void *where_ast);
-const void *conformance_table_get_where(const ConformanceTable *ct, const char *type_name,
-                                        const char *protocol_name);
-int conformance_table_has(const ConformanceTable *ct, const char *type_name,
-                          const char *protocol_name);
 int check_conformance(const ASTNode *type_decl, const ASTNode *proto_decl,
                       SemaContext *ctx, const ASTNode *ast_root);
 void pass3_check_conformances(SemaContext *ctx, ASTNode *root);
-void assoc_type_table_init(AssocTypeTable *at);
-void assoc_type_table_add(AssocTypeTable *at, const char *type_name,
-                          const char *protocol_name, const char *assoc_name,
-                          const char *concrete_type_name);
-const char *assoc_type_table_get(const AssocTypeTable *at, const char *type_name,
-                                 const char *protocol_name, const char *assoc_name);
 TypeInfo *resolve_assoc_type_to_concrete(SemaContext *ctx, const TypeInfo *concrete_type,
                                          const char *protocol_name, const char *assoc_name);
 TypeInfo *infer_concrete_at_assoc(const ASTNode *proto_ast, TypeInfo *impl_ty,
