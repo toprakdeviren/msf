@@ -24,15 +24,15 @@
  * clears the diagnostic pointer.  Caller must set l->diag after
  * init if diagnostics are desired (lexer_tokenize does this automatically).
  *
- * @param l    Lexer state to initialize.
+ * @param lexer    Lexer state to initialize.
  * @param src  Source to scan (must outlive the lexer).
  */
-void lexer_init(Lexer *l, const Source *src) {
-  l->src  = src;
-  l->pos  = 0;
-  l->line = 1;
-  l->col  = 1;
-  l->diag = NULL;
+void lexer_init(Lexer *lexer, const Source *src) {
+  lexer->src  = src;
+  lexer->pos  = 0;
+  lexer->line = 1;
+  lexer->col  = 1;
+  lexer->diag = NULL;
 }
 
 /**
@@ -53,73 +53,99 @@ void lexer_init(Lexer *l, const Source *src) {
  * Returns TOK_EOF when the source is exhausted.  Never returns an error —
  * invalid input produces TOK_UNKNOWN tokens with diagnostics recorded.
  *
- * @param l  Lexer state (pos/line/col are advanced past the returned token).
+ * @param lexer  Lexer state (pos/line/col are advanced past the returned token).
  * @return   The next token.
  */
-Token lexer_next(Lexer *l) {
-  const uint8_t *s = (const uint8_t *)l->src->data;
-  uint32_t len = (l->src->len <= LEXER_MAX_SOURCE_LEN)
-                     ? (uint32_t)l->src->len : LEXER_MAX_SOURCE_LEN;
+Token lexer_next(Lexer *lexer) {
+  const uint8_t *s = (const uint8_t *)lexer->src->data;
+  const uint32_t len = lexer->src->len <= LEXER_MAX_SOURCE_LEN
+                      ? (uint32_t)lexer->src->len : LEXER_MAX_SOURCE_LEN;
 
-  if (l->pos >= len)
-    return (Token){TOK_EOF, (uint32_t)l->pos, 0, l->line, l->col, KW_NONE, OP_NONE};
+  if (lexer->pos >= len)
+    return (Token){
+      TOK_EOF,
+      (uint32_t)lexer->pos,
+      0,
+      lexer->line,
+      lexer->col,
+      KW_NONE,
+      OP_NONE
+    };
 
-  uint32_t sp = l->pos, sl = l->line, sc = l->col;
-  uint8_t c   = s[l->pos];
-  uint8_t cls = LEX_CHAR_CLASS[c];
-  uint8_t act = LEX_ACTION[cls];
+  const uint32_t sp = lexer->pos, sl = lexer->line, sc = lexer->col;
+  const uint8_t c   = s[lexer->pos];
+  const uint8_t cls = LEX_CHAR_CLASS[c];
+  const uint8_t act = LEX_ACTION[cls];
 
   /* Newline */
   if (cls == CC_NEWLINE) {
-    l->pos++;
-    SKIP_CRLF(s, l->pos, len);
-    l->line++; l->col = 1;
-    return (Token){TOK_NEWLINE, sp, (uint32_t)(l->pos - sp), sl, sc, KW_NONE, OP_NONE};
+    lexer->pos++;
+    SKIP_CRLF(s, lexer->pos, len);
+    lexer->line++; lexer->col = 1;
+    return (Token){
+      TOK_NEWLINE,
+      sp,
+      (uint32_t)(lexer->pos - sp),
+      sl,
+      sc,
+      KW_NONE,
+      OP_NONE
+    };
   }
 
   /* Whitespace */
   if (act == 0 && cls == CC_WHITESPACE) {
-    while (l->pos < len && LEX_CHAR_CLASS[s[l->pos]] == CC_WHITESPACE) ADVANCE(l);
-    return (Token){TOK_WHITESPACE, sp, (uint32_t)(l->pos - sp), sl, sc, KW_NONE, OP_NONE};
+    while (lexer->pos < len && LEX_CHAR_CLASS[s[lexer->pos]] == CC_WHITESPACE) ADVANCE(lexer);
+    return (Token){TOK_WHITESPACE, sp, (uint32_t)(lexer->pos - sp), sl, sc, KW_NONE, OP_NONE};
   }
 
   /* Identifier / keyword */
   if (act == 1) {
-    uint32_t kw_id = 0, tl = scan_ident(s, l->pos, len, &kw_id);
+    uint32_t kw_id = 0;
+    const uint32_t tl = scan_ident(s, lexer->pos, len, &kw_id);
+
     if (tl == 0) {
-      uint8_t lead = s[l->pos];
+      const uint8_t lead = s[lexer->pos];
       uint32_t skip = 1;
       if      ((lead & 0xE0) == 0xC0) skip = 2;
       else if ((lead & 0xF0) == 0xE0) skip = 3;
       else if ((lead & 0xF8) == 0xF0) skip = 4;
-      if (l->pos + skip > len) skip = len - l->pos;
-      l->pos += skip; l->col++;
-      return (Token){TOK_UNKNOWN, sp, skip, sl, sc, KW_NONE, OP_NONE};
+      if (lexer->pos + skip > len) skip = len - lexer->pos;
+      lexer->pos += skip; lexer->col++;
+      return (Token){
+        TOK_UNKNOWN,
+        sp,
+        skip,
+        sl,
+        sc,
+        KW_NONE,
+        OP_NONE
+      };
     }
-    l->col += tl; l->pos += tl;
+    lexer->col += tl; lexer->pos += tl;
     Keyword kw = map_kw_id(kw_id);
     return (Token){kw ? TOK_KEYWORD : TOK_IDENTIFIER, sp, tl, sl, sc, kw, OP_NONE};
   }
 
   /* Number */
   if (act == 2) {
-    uint32_t ttype = TT_INTEGER_LITERAL, tl = scan_number(s, l->pos, len, &ttype);
-    l->col += tl; l->pos += tl;
+    uint32_t ttype = TT_INTEGER_LITERAL, tl = scan_number(s, lexer->pos, len, &ttype);
+    lexer->col += tl; lexer->pos += tl;
     return (Token){(ttype == TT_FLOAT_LITERAL) ? TOK_FLOAT_LIT : TOK_INTEGER_LIT,
                    sp, tl, sl, sc, KW_NONE, OP_NONE};
   }
 
   /* String */
-  if (act == 3) return scan_string(l, s, len, sp, sl, sc);
+  if (act == 3) return scan_string(lexer, s, len, sp, sl, sc);
 
   /* Raw string */
   if (IS_RAW_STRING_START(c)) { 
-    Token r = scan_raw_string(l, s, len, sp, sl, sc); 
+    Token r = scan_raw_string(lexer, s, len, sp, sl, sc);
     if (r.len > 0) return r; 
   }
 
   /* Operator / comment / regex */
-  return scan_symbol(l, s, len, c, sp, sl, sc);
+  return scan_symbol(lexer, s, len, c, sp, sl, sc);
 }
 
 /**

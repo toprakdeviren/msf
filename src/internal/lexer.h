@@ -84,10 +84,10 @@ typedef struct {
 } Lexer;
 
 /** @brief Initializes lexer state: pos=0, line=1, col=1. */
-void lexer_init(Lexer *l, const Source *src);
+void lexer_init(Lexer *lexer, const Source *src);
 
 /** @brief Produces the next token.  Returns TOK_EOF at end of source. */
-Token lexer_next(Lexer *l);
+Token lexer_next(Lexer *lexer);
 
 /* ┌──────────────────────────────────────────────────────────────────────────┐
  * │  3. TOKEN STREAM — dynamic array of tokens                             │

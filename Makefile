@@ -1,12 +1,13 @@
 # MiniSwiftFrontend — Standalone Swift Lexer, Parser & Semantic Analysis Library
 #
 # Produces: libMiniSwiftFrontend.a (static library)
+# Bundles:  libMetal.a (sibling MSL→WGSL parser, built from ../metal)
 #
 # Targets:
-#   make                  # debug build (native)
+#   make                  # debug build (native, builds metal too)
 #   make release          # optimized build (native)
 #   make wasm             # WebAssembly build (requires emcc)
-#   make dist             # copy headers + libs to dist/
+#   make dist             # copy headers + libs (incl. metal) to dist/
 #   make codegen          # regenerate .h files from data/
 #   make clean
 #
@@ -16,7 +17,7 @@
 #
 # Usage (as subproject):
 #   Parent Makefile calls: $(MAKE) -C lib/MiniSwiftFrontend
-#   Then links with: -Llib/MiniSwiftFrontend/build/native -lMiniSwiftFrontend
+#   Then links with: -Llib/MiniSwiftFrontend/build/native -lMiniSwiftFrontend -lMetal
 #   And includes:    -Ilib/MiniSwiftFrontend/include -Ilib/MiniSwiftFrontend/generated
 
 CC      ?= clang
@@ -32,12 +33,21 @@ SRCDIR   = $(ROOT)src
 BUILDDIR = $(ROOT)build
 DISTDIR  = $(ROOT)dist
 
+# ── Sibling: Metal (MSL → WGSL) parser ──────────────────────────────────────
+# Built as a separate static library and shipped alongside libMiniSwiftFrontend.a.
+# Consumers link both: -lMiniSwiftFrontend -lMetal
+METAL_DIR        ?= $(ROOT)../metal
+METAL_INCDIR      = $(METAL_DIR)/include
+METAL_NATIVE_LIB  = $(METAL_DIR)/.build/libMetal.a
+METAL_WASM_LIB    = $(METAL_DIR)/.build/wasm/libMetal.a
+
 # Include paths
-#   INCDIR  — public headers (include/)
-#   GENDIR  — generated .h files (generated/)
-#   SRCDIR  — internal headers (src/internal/*.h)
-#   libs/   — libunicode (decoder) headers
-INCLUDES = -I$(INCDIR) -I$(GENDIR) -I$(SRCDIR) -I$(ROOT)libs/include
+#   INCDIR        — public headers (include/)
+#   GENDIR        — generated .h files (generated/)
+#   SRCDIR        — internal headers (src/internal/*.h)
+#   libs/         — libunicode (decoder) headers
+#   METAL_INCDIR  — metal public header (metal.h)
+INCLUDES = -I$(INCDIR) -I$(GENDIR) -I$(SRCDIR) -I$(ROOT)libs/include -I$(METAL_INCDIR)
 
 # Source files
 SRCS = $(wildcard $(SRCDIR)/*.c) \
@@ -73,17 +83,24 @@ TESTDIR    = $(ROOT)tests
 TEST_SRCS  = $(wildcard $(TESTDIR)/*.c)
 TEST_BIN   = $(BUILDDIR)/test_runner
 
-.PHONY: all debug release wasm dist clean codegen test
+.PHONY: all debug release wasm dist clean codegen test metal-native metal-wasm
 
 all: debug
 
 debug: CFLAGS += -g -O0
-debug: $(NATIVE_LIB)
+debug: metal-native $(NATIVE_LIB)
 
 release: CFLAGS += -O2 -DNDEBUG
-release: $(NATIVE_LIB)
+release: metal-native $(NATIVE_LIB)
 
-wasm: $(WASM_LIB)
+wasm: metal-wasm $(WASM_LIB)
+
+# ── Metal sub-make ───────────────────────────────────────────────────────────
+metal-native:
+	@$(MAKE) --no-print-directory -C $(METAL_DIR) all
+
+metal-wasm:
+	@$(MAKE) --no-print-directory -C $(METAL_DIR) wasm
 
 # ── Native compile + archive ─────────────────────────────────────────────────
 $(NATIVE_LIB): $(NATIVE_OBJS)
@@ -118,23 +135,30 @@ dist: release
 	@rm -rf $(DISTDIR)
 	@mkdir -p $(DISTDIR)/include $(DISTDIR)/include/decoder $(DISTDIR)/lib
 	@cp $(INCDIR)/msf.h $(DISTDIR)/include/
-	@cp $(GENDIR)/*.h $(DISTDIR)/include/
+	@if [ -d "$(GENDIR)" ] && ls $(GENDIR)/*.h >/dev/null 2>&1; then \
+		cp $(GENDIR)/*.h $(DISTDIR)/include/; \
+	fi
 	@cp $(ROOT)libs/include/*.h $(DISTDIR)/include/decoder/
+	@cp $(METAL_INCDIR)/metal.h $(DISTDIR)/include/
 	@cp $(NATIVE_LIB) $(DISTDIR)/lib/
 	@cp $(ROOT)libs/libunicode.a $(DISTDIR)/lib/ 2>/dev/null || true
+	@cp $(METAL_NATIVE_LIB) $(DISTDIR)/lib/ 2>/dev/null || true
 	@if [ -f "$(WASM_LIB)" ]; then \
 		mkdir -p $(DISTDIR)/lib/wasm; \
 		cp $(WASM_LIB) $(DISTDIR)/lib/wasm/; \
+		[ -f "$(METAL_WASM_LIB)" ] && cp $(METAL_WASM_LIB) $(DISTDIR)/lib/wasm/ || true; \
 	fi
 	@echo "  \xf0\x9f\x93\xa6 dist/"
-	@echo "     include/  (6 public + decoder/ + $(words $(wildcard $(GENDIR)/*.h)) generated)"
-	@echo "     lib/      libMiniSwiftFrontend.a + libunicode.a"
+	@echo "     include/  (msf.h + metal.h + decoder/ + $(words $(wildcard $(GENDIR)/*.h)) generated)"
+	@echo "     lib/      libMiniSwiftFrontend.a + libMetal.a + libunicode.a"
 
 # ── Test: build and run unit tests ────────────────────────────────────────────
 test: debug
 	@printf "  %-7s %s\n" "LINK" "test_runner"
 	@$(CC) $(CFLAGS) -g -O0 $(INCLUDES) -I$(TESTDIR) \
-		$(TEST_SRCS) -L$(NATIVE_DIR) -lMiniSwiftFrontend \
+		$(TEST_SRCS) \
+		-L$(NATIVE_DIR) -lMiniSwiftFrontend \
+		-L$(dir $(METAL_NATIVE_LIB)) -lMetal \
 		-o $(TEST_BIN)
 	@$(TEST_BIN)
 
