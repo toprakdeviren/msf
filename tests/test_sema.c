@@ -107,6 +107,113 @@ static void test_sema_float_literal(void) {
   TEST_PASS();
 }
 
+static void test_sema_float_array_literal_default_double(void) {
+  TEST("let arr = [1.0, 2.0, 3.0] → [Double]");
+  TestPipeline tp = {0};
+  pipeline_run(&tp, "let arr = [1.0, 2.0, 3.0]");
+  const ASTNode *let = find_desc(tp.root, AST_LET_DECL);
+  ASSERT_NOT_NULL(let);
+  ASSERT_NOT_NULL(let->type);
+  ASSERT_EQ(let->type->kind, TY_ARRAY);
+  ASSERT_EQ(let->type->inner, TY_BUILTIN_DOUBLE);
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_float_array_annotated_float(void) {
+  TEST("let arr: [Float] = [1.0, 2.0] → [Float] (annotation narrows)");
+  TestPipeline tp = {0};
+  pipeline_run(&tp, "let arr: [Float] = [1.0, 2.0]");
+  const ASTNode *let = find_desc(tp.root, AST_LET_DECL);
+  ASSERT_NOT_NULL(let);
+  ASSERT_NOT_NULL(let->type);
+  ASSERT_EQ(let->type->kind, TY_ARRAY);
+  ASSERT_EQ(let->type->inner, TY_BUILTIN_FLOAT);
+  ASSERT_EQ(sema_error_count(tp.sema), 0);
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_float_array_annotated_double(void) {
+  TEST("let arr: [Double] = [1.0, 2.0] → [Double]");
+  TestPipeline tp = {0};
+  pipeline_run(&tp, "let arr: [Double] = [1.0, 2.0]");
+  const ASTNode *let = find_desc(tp.root, AST_LET_DECL);
+  ASSERT_NOT_NULL(let);
+  ASSERT_NOT_NULL(let->type);
+  ASSERT_EQ(let->type->kind, TY_ARRAY);
+  ASSERT_EQ(let->type->inner, TY_BUILTIN_DOUBLE);
+  ASSERT_EQ(sema_error_count(tp.sema), 0);
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_float_dict_value_default_double(void) {
+  TEST("let d = [\"a\": 1.0] → [String: Double]");
+  TestPipeline tp = {0};
+  pipeline_run(&tp, "let d = [\"a\": 1.0]");
+  const ASTNode *let = find_desc(tp.root, AST_LET_DECL);
+  ASSERT_NOT_NULL(let);
+  ASSERT_NOT_NULL(let->type);
+  ASSERT_EQ(let->type->kind, TY_DICT);
+  ASSERT_EQ(let->type->dict.value, TY_BUILTIN_DOUBLE);
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_float_array_annot_inner_literals_narrowed(void) {
+  TEST("let arr: [Float] = [1.0, 2.0] → inner literals also Float (not Double)");
+  TestPipeline tp = {0};
+  pipeline_run(&tp, "let arr: [Float] = [1.0, 2.0]");
+  const ASTNode *arr = find_desc(tp.root, AST_ARRAY_LITERAL);
+  ASSERT_NOT_NULL(arr);
+  ASSERT_NOT_NULL(arr->type);
+  /* Array literal node itself should reflect the annotation. */
+  ASSERT_EQ(arr->type->kind, TY_ARRAY);
+  ASSERT_EQ(arr->type->inner, TY_BUILTIN_FLOAT);
+  /* Each child float literal must be narrowed to Float, not Double. */
+  for (const ASTNode *c = arr->first_child; c; c = c->next_sibling) {
+    ASSERT_EQ(c->kind, AST_FLOAT_LITERAL);
+    ASSERT_EQ(c->type, TY_BUILTIN_FLOAT);
+  }
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_float_var_annot_inner_literal_narrowed(void) {
+  TEST("var x: Float = 3.14 → init literal also Float (not Double)");
+  TestPipeline tp = {0};
+  pipeline_run(&tp, "var x: Float = 3.14");
+  const ASTNode *var = find_desc(tp.root, AST_VAR_DECL);
+  ASSERT_NOT_NULL(var);
+  ASSERT_EQ(var->type, TY_BUILTIN_FLOAT);
+  /* The init literal child should also be narrowed. */
+  const ASTNode *lit = find_desc(var, AST_FLOAT_LITERAL);
+  ASSERT_NOT_NULL(lit);
+  ASSERT_EQ(lit->type, TY_BUILTIN_FLOAT);
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_float_dict_annot_inner_literals_narrowed(void) {
+  TEST("let d: [String: Float] = [\"a\": 1.0] → inner value literal Float");
+  TestPipeline tp = {0};
+  pipeline_run(&tp, "let d: [String: Float] = [\"a\": 1.0]");
+  const ASTNode *dict = find_desc(tp.root, AST_DICT_LITERAL);
+  ASSERT_NOT_NULL(dict);
+  ASSERT_NOT_NULL(dict->type);
+  ASSERT_EQ(dict->type->kind, TY_DICT);
+  ASSERT_EQ(dict->type->dict.value, TY_BUILTIN_FLOAT);
+  /* The value child (second) should be narrowed Float. */
+  const ASTNode *value_lit = dict->first_child ? dict->first_child->next_sibling
+                                                : NULL;
+  ASSERT_NOT_NULL(value_lit);
+  ASSERT_EQ(value_lit->kind, AST_FLOAT_LITERAL);
+  ASSERT_EQ(value_lit->type, TY_BUILTIN_FLOAT);
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
 /* ── Struct type resolution ───────────────────────────────────────────────── */
 
 static void test_sema_struct_type(void) {
@@ -226,6 +333,13 @@ void run_sema_tests(void) {
   test_sema_let_string_type();
   test_sema_bool_literal();
   test_sema_float_literal();
+  test_sema_float_array_literal_default_double();
+  test_sema_float_array_annotated_float();
+  test_sema_float_array_annotated_double();
+  test_sema_float_dict_value_default_double();
+  test_sema_float_var_annot_inner_literal_narrowed();
+  test_sema_float_array_annot_inner_literals_narrowed();
+  test_sema_float_dict_annot_inner_literals_narrowed();
   test_sema_struct_type();
   test_sema_func_type();
   test_sema_optional_type();

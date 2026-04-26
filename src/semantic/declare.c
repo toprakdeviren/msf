@@ -467,7 +467,11 @@ void declare_named(SemaContext *ctx, ASTNode *node, SymbolKind sk,
   }
 
   sema_define(ctx, iname, sk, ti, node);
-  if (ti && !node->type)
+  /* Forward-declare nominal types (struct/class/enum/protocol/actor) so
+   * self-references inside them resolve. For var/let, defer node->type to
+   * pass 2 (resolve_var_decl) so init expressions are resolved with the
+   * annotation in scope and literal narrowing fires. */
+  if (ti && !node->type && is_nominal)
     ((ASTNode *)node)->type = ti;
 
   validate_character_literal(ctx, node);

@@ -81,13 +81,38 @@ TypeInfo *resolve_var_decl(SemaContext *ctx, ASTNode *node) {
 
   /* Float literal inference:
    * In Swift, a float literal like 3.14 defaults to Double.
-   * However, if the variable has an explicit Float annotation,
-   * the literal should be narrowed to Float (f32).
-   * e.g. var x: Float = 3.14  -> literal is Float, not Double */
+   * If the variable has an explicit Float annotation, the literal
+   * should be narrowed to Float (f32). The same pushdown applies to
+   * each element of an array literal (`let arr: [Float] = [1.0, 2.0]`)
+   * and to each value of a dict literal (`let d: [K: Float] = [..: 1.0]`),
+   * so the IR sees Float at every leaf instead of a [Double] expression
+   * implicitly converted to a [Float] variable. */
   if (annot_t && annot_t == TY_BUILTIN_FLOAT && init &&
       init->kind == AST_FLOAT_LITERAL) {
     ((ASTNode *)init)->type = TY_BUILTIN_FLOAT;
     init_t = TY_BUILTIN_FLOAT;
+  }
+  if (annot_t && init && annot_t->kind == TY_ARRAY &&
+      annot_t->inner == TY_BUILTIN_FLOAT &&
+      init->kind == AST_ARRAY_LITERAL && init->first_child) {
+    for (ASTNode *c = init->first_child; c; c = c->next_sibling)
+      if (c->kind == AST_FLOAT_LITERAL)
+        c->type = TY_BUILTIN_FLOAT;
+    ((ASTNode *)init)->type = annot_t;
+    init_t = annot_t;
+  }
+  if (annot_t && init && annot_t->kind == TY_DICT &&
+      annot_t->dict.value == TY_BUILTIN_FLOAT &&
+      init->kind == AST_DICT_LITERAL && init->first_child) {
+    /* Children alternate key, value, key, value... narrow value slots. */
+    int is_key = 1;
+    for (ASTNode *c = init->first_child; c; c = c->next_sibling) {
+      if (!is_key && c->kind == AST_FLOAT_LITERAL)
+        c->type = TY_BUILTIN_FLOAT;
+      is_key = !is_key;
+    }
+    ((ASTNode *)init)->type = annot_t;
+    init_t = annot_t;
   }
 
   /* Empty collection literal type propagation:
