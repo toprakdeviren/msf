@@ -781,6 +781,35 @@ TypeInfo *resolve_func_decl(SemaContext *ctx, ASTNode *node) {
 
   /* Track current function for mutating check (struct instance methods) */
   ctx->current_func_decl = node;
+
+  /* Actor isolation: derive this function's isolation from its modifiers and
+   * the enclosing type, then push it for the body. `nonisolated` opts out
+   * even inside a MainActor type. */
+  uint8_t saved_isolation = ctx->current_isolation_main_actor;
+  const ASTNode *saved_actor = ctx->current_actor_decl;
+  if (node->modifiers & MOD_NONISOLATED) {
+    ctx->current_isolation_main_actor = 0;
+    ctx->current_actor_decl = NULL;
+  } else {
+    if (node->modifiers & MOD_MAIN_ACTOR)
+      ctx->current_isolation_main_actor = 1;
+    /* Inherit from enclosing type if not already set */
+    const ASTNode *enclosing_type = NULL;
+    for (const ASTNode *p = node->parent; p; p = p->parent) {
+      if (p->kind == AST_STRUCT_DECL || p->kind == AST_CLASS_DECL ||
+          p->kind == AST_ACTOR_DECL || p->kind == AST_ENUM_DECL) {
+        enclosing_type = p;
+        break;
+      }
+    }
+    if (enclosing_type) {
+      if (enclosing_type->modifiers & MOD_MAIN_ACTOR)
+        ctx->current_isolation_main_actor = 1;
+      if (enclosing_type->kind == AST_ACTOR_DECL)
+        ctx->current_actor_decl = enclosing_type;
+    }
+  }
+
   /* Params + body */
   for (ASTNode *c = node->first_child; c; c = c->next_sibling) {
     if (c->kind == AST_PARAM)
@@ -801,6 +830,8 @@ TypeInfo *resolve_func_decl(SemaContext *ctx, ASTNode *node) {
       resolve_node(ctx, c);
     }
   }
+  ctx->current_isolation_main_actor = saved_isolation;
+  ctx->current_actor_decl = saved_actor;
   ctx->current_func_decl = NULL;
   /* restore opaque return state */
   ctx->opaque_return_constraint = saved_opaque_constraint;

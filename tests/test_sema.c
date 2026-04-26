@@ -553,6 +553,108 @@ static void test_sema_wrapper_no_projected_means_no_dollar(void) {
   TEST_PASS();
 }
 
+/* ── Actor isolation (Tier 1.2) ──────────────────────────────────────── */
+
+static void test_sema_main_actor_member_from_sync_rejected(void) {
+  TEST("@MainActor class member accessed from sync ctx → diagnostic");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "@MainActor class ViewModel { var count: Int = 0 }\n"
+               "func update() {\n"
+               "    let vm = ViewModel()\n"
+               "    let _ = vm.count\n"
+               "}");
+  ASSERT(has_error_with(tp.sema, "Main actor", "await", NULL));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_main_actor_member_from_main_actor_ok(void) {
+  TEST("@MainActor func accessing @MainActor member → no error");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "@MainActor class ViewModel { var count: Int = 0 }\n"
+               "@MainActor func update() {\n"
+               "    let vm = ViewModel()\n"
+               "    let _ = vm.count\n"
+               "}");
+  /* Must not produce the cross-actor diagnostic */
+  for (uint32_t i = 0; i < sema_error_count(tp.sema); i++) {
+    const char *m = sema_error_message(tp.sema, i);
+    if (m && strstr(m, "Main actor"))
+      ASSERT(0);
+  }
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_main_actor_member_with_await_ok(void) {
+  TEST("await vm.count from non-MainActor ctx → no diagnostic");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "@MainActor class ViewModel { var count: Int = 0 }\n"
+               "func update() async {\n"
+               "    let vm = ViewModel()\n"
+               "    let _ = await vm.count\n"
+               "}");
+  for (uint32_t i = 0; i < sema_error_count(tp.sema); i++) {
+    const char *m = sema_error_message(tp.sema, i);
+    if (m && strstr(m, "Main actor"))
+      ASSERT(0);
+  }
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_actor_member_from_outside_rejected(void) {
+  TEST("actor member accessed from outside actor → diagnostic");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "actor Counter { var n: Int = 0 }\n"
+               "func bump(_ c: Counter) {\n"
+               "    let _ = c.n\n"
+               "}");
+  ASSERT(has_error_with(tp.sema, "Actor-isolated", "await", NULL));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_actor_member_with_await_ok(void) {
+  TEST("await c.n from async ctx → no diagnostic");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "actor Counter { var n: Int = 0 }\n"
+               "func bump(_ c: Counter) async {\n"
+               "    let _ = await c.n\n"
+               "}");
+  for (uint32_t i = 0; i < sema_error_count(tp.sema); i++) {
+    const char *m = sema_error_message(tp.sema, i);
+    if (m && strstr(m, "Actor-isolated"))
+      ASSERT(0);
+  }
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_nonisolated_member_always_reachable(void) {
+  TEST("nonisolated member of @MainActor class reachable from sync ctx");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "@MainActor class V {\n"
+               "    nonisolated var id: Int { return 0 }\n"
+               "}\n"
+               "func read(_ v: V) {\n"
+               "    let _ = v.id\n"
+               "}");
+  for (uint32_t i = 0; i < sema_error_count(tp.sema); i++) {
+    const char *m = sema_error_message(tp.sema, i);
+    if (m && strstr(m, "Main actor"))
+      ASSERT(0);
+  }
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
 /* ── Optional binding (if let) ────────────────────────────────────────────── */
 
 static void test_sema_if_let_binding(void) {
@@ -609,5 +711,11 @@ void run_sema_tests(void) {
   test_sema_wrapper_projected_basic();
   test_sema_wrapper_missing_wrapped_value();
   test_sema_wrapper_no_projected_means_no_dollar();
+  test_sema_main_actor_member_from_sync_rejected();
+  test_sema_main_actor_member_from_main_actor_ok();
+  test_sema_main_actor_member_with_await_ok();
+  test_sema_actor_member_from_outside_rejected();
+  test_sema_actor_member_with_await_ok();
+  test_sema_nonisolated_member_always_reachable();
   test_sema_if_let_binding();
 }

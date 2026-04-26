@@ -137,6 +137,13 @@ struct SemaContext {
   void        *current_func_decl;
   const ASTNode *ast_root;
 
+  /* Actor isolation context — scope of the function/closure currently being
+   * resolved. `main_actor` is set for @MainActor and @MainActor-class members;
+   * `actor_decl` points at the enclosing AST_ACTOR_DECL when inside an actor
+   * method (so cross-actor access can be diagnosed). */
+  uint8_t        current_isolation_main_actor;
+  const ASTNode *current_actor_decl;
+
   /* Two-phase class initialization */
   uint8_t     in_class_init_phase1;
   uint8_t     init_is_convenience;

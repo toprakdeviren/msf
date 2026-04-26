@@ -6,8 +6,77 @@
 
 #include "../../private.h"
 
-/*
- */
+/* Walk up from a member-expression to see if it sits under an `await`
+ * expression in the same function/closure scope. We bail at any function
+ * boundary so an outer `await` doesn't cover an inner closure body. */
+static int member_is_under_await(const ASTNode *node) {
+  for (const ASTNode *p = node ? node->parent : NULL; p; p = p->parent) {
+    if (p->kind == AST_AWAIT_EXPR) return 1;
+    if (p->kind == AST_FUNC_DECL || p->kind == AST_CLOSURE_EXPR ||
+        p->kind == AST_INIT_DECL || p->kind == AST_DEINIT_DECL)
+      return 0;
+  }
+  return 0;
+}
+
+/* Diagnose cross-actor member access. Two patterns are caught:
+ *
+ *   - `@MainActor` type's member accessed from a non-MainActor context
+ *     without `await`
+ *   - any actor's member accessed from outside that actor without `await`
+ *
+ * `nonisolated` members are exempt. The `await` cover lets async code
+ * cross the boundary explicitly. */
+static void check_actor_isolation_for_member(SemaContext *ctx,
+                                              const ASTNode *node,
+                                              const TypeInfo *base_t,
+                                              const ASTNode *member_decl) {
+  if (!base_t || base_t->kind != TY_NAMED || !base_t->named.decl)
+    return;
+  const ASTNode *target_decl = (const ASTNode *)base_t->named.decl;
+
+  /* Pass 2's resolve_node early-returns when a nominal type already has
+   * its TypeInfo set — which is the case for struct/class/actor decls
+   * that pass 1 forward-declared. The consequence: apply_preceding_main_actor
+   * never fires for those decls. Apply the lazy version here so we can read
+   * MOD_MAIN_ACTOR off the AST node. */
+  if (!(target_decl->modifiers & MOD_MAIN_ACTOR) && target_decl->parent) {
+    for (const ASTNode *sib = target_decl->parent->first_child; sib;
+         sib = sib->next_sibling) {
+      if (sib->next_sibling != target_decl) continue;
+      if (sib->kind != AST_ATTRIBUTE) break;
+      const Token *at = &ctx->tokens[sib->data.var.name_tok];
+      if (at->len == sizeof(SW_ATTR_MAIN_ACTOR) - 1 &&
+          memcmp(ctx->src->data + at->pos, SW_ATTR_MAIN_ACTOR,
+                 sizeof(SW_ATTR_MAIN_ACTOR) - 1) == 0)
+        ((ASTNode *)target_decl)->modifiers |= MOD_MAIN_ACTOR;
+      break;
+    }
+  }
+
+  /* nonisolated member is always reachable */
+  if (member_decl && (member_decl->modifiers & MOD_NONISOLATED))
+    return;
+
+  /* Actor type — direct property access from outside the actor body
+   * always crosses the actor boundary. */
+  if (target_decl->kind == AST_ACTOR_DECL) {
+    if (ctx->current_actor_decl == target_decl) return;
+    if (member_is_under_await(node)) return;
+    sema_error(ctx, (ASTNode *)node,
+               "Actor-isolated member access requires 'await'");
+    return;
+  }
+
+  /* @MainActor type — cross-context access without await */
+  if (target_decl->modifiers & MOD_MAIN_ACTOR) {
+    if (ctx->current_isolation_main_actor) return;
+    if (member_is_under_await(node)) return;
+    sema_error(ctx, (ASTNode *)node,
+               "Main actor-isolated member access from a non-MainActor "
+               "context requires 'await'");
+  }
+}
 
 TypeInfo *resolve_member_expr(SemaContext *ctx, ASTNode *node) {
   ASTNode *base = node->first_child;
@@ -185,6 +254,7 @@ TypeInfo *resolve_member_expr(SemaContext *ctx, ASTNode *node) {
         if (chn == mname) {
           if (!private_member_visible(ctx, ch, decl))
             sema_error(ctx, node, "private member is not accessible");
+          check_actor_isolation_for_member(ctx, node, unwrapped_base, ch);
           if (!ch->type)
             resolve_node(ctx, (ASTNode *)ch);
           TypeInfo *t = ((ASTNode *)ch)->type;
@@ -196,6 +266,7 @@ TypeInfo *resolve_member_expr(SemaContext *ctx, ASTNode *node) {
         if (chn == mname) {
           if (!private_member_visible(ctx, ch, decl))
             sema_error(ctx, node, "private member is not accessible");
+          check_actor_isolation_for_member(ctx, node, unwrapped_base, ch);
           if (!ch->type)
             resolve_node(ctx, (ASTNode *)ch);
           TypeInfo *t = ((ASTNode *)ch)->type;
@@ -210,6 +281,7 @@ TypeInfo *resolve_member_expr(SemaContext *ctx, ASTNode *node) {
         if (chn == mname) {
           if (!private_member_visible(ctx, var, decl))
             sema_error(ctx, node, "private member is not accessible");
+          check_actor_isolation_for_member(ctx, node, unwrapped_base, var);
           if (!var->type)
             resolve_node(ctx, (ASTNode *)var);
           TypeInfo *t = ((ASTNode *)var)->type;
