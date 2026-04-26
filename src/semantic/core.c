@@ -706,3 +706,8 @@ uint32_t sema_error_line(const SemaContext *ctx, uint32_t index) {
 uint32_t sema_error_col(const SemaContext *ctx, uint32_t index) {
   return (!ctx || index >= ctx->error_count) ? 0 : ctx->error_col[index];
 }
+
+/** @brief Returns the conformance table for inspection by callers. */
+const ConformanceTable *sema_conformance_table(const SemaContext *ctx) {
+  return ctx ? ctx->conformance_table : NULL;
+}

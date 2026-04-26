@@ -318,6 +318,8 @@ TypeInfo *resolve_member_expr(SemaContext *ctx, ASTNode *node);
 int check_conformance(const ASTNode *type_decl, const ASTNode *proto_decl,
                       SemaContext *ctx, const ASTNode *ast_root);
 void pass3_check_conformances(SemaContext *ctx, ASTNode *root);
+int  is_type_sendable(const SemaContext *ctx, const TypeInfo *t);
+void infer_and_check_sendable(SemaContext *ctx, const ASTNode *root);
 TypeInfo *resolve_assoc_type_to_concrete(SemaContext *ctx, const TypeInfo *concrete_type,
                                          const char *protocol_name, const char *assoc_name);
 TypeInfo *infer_concrete_at_assoc(const ASTNode *proto_ast, TypeInfo *impl_ty,

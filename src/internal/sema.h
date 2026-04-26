@@ -69,6 +69,9 @@ uint32_t    sema_error_line(const SemaContext *ctx, uint32_t index);
 /** @brief Returns the 1-based column number of the error at @p index. */
 uint32_t    sema_error_col(const SemaContext *ctx, uint32_t index);
 
+/** @brief Returns the conformance table (NULL if sema not initialized). */
+const ConformanceTable *sema_conformance_table(const SemaContext *ctx);
+
 #ifdef __cplusplus
 }
 #endif

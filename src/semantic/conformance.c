@@ -118,6 +118,128 @@ int check_conformance(const ASTNode *type_decl, const ASTNode *proto_decl,
                       SemaContext *ctx, const ASTNode *ast_root);
 
 /* ═══════════════════════════════════════════════════════════════════════════════
+ * Sendable inference (Tier 2.2)
+ * ═══════════════════════════════════════════════════════════════════════════════
+ * Value types (struct/enum) are Sendable when every stored property's type is
+ * Sendable. This helper answers the question for any TypeInfo by consulting
+ * the conformance table for nominal types and recursing into composites. */
+int is_type_sendable(const SemaContext *ctx, const TypeInfo *t) {
+  if (!t || !ctx || !ctx->conformance_table) return 0;
+  if (t == TY_BUILTIN_INT || t == TY_BUILTIN_DOUBLE ||
+      t == TY_BUILTIN_FLOAT || t == TY_BUILTIN_BOOL ||
+      t == TY_BUILTIN_STRING || t == TY_BUILTIN_VOID ||
+      t == TY_BUILTIN_DATA || t == TY_BUILTIN_SUBSTRING ||
+      t == TY_BUILTIN_UINT || t == TY_BUILTIN_UINT8 ||
+      t == TY_BUILTIN_UINT16 || t == TY_BUILTIN_UINT32 ||
+      t == TY_BUILTIN_UINT64)
+    return 1;
+  switch (t->kind) {
+  case TY_OPTIONAL:
+  case TY_ARRAY:
+  case TY_SET:
+    return is_type_sendable(ctx, t->inner);
+  case TY_DICT:
+    return is_type_sendable(ctx, t->dict.key) &&
+           is_type_sendable(ctx, t->dict.value);
+  case TY_TUPLE: {
+    for (size_t i = 0; i < t->tuple.elem_count; i++)
+      if (!is_type_sendable(ctx, t->tuple.elems[i])) return 0;
+    return 1;
+  }
+  case TY_NAMED:
+    if (!t->named.name) return 0;
+    return conformance_table_has(ctx->conformance_table, t->named.name,
+                                 SW_PROTO_SENDABLE);
+  case TY_GENERIC_INST:
+    if (t->generic.base && t->generic.base->kind == TY_NAMED &&
+        t->generic.base->named.name) {
+      if (!conformance_table_has(ctx->conformance_table,
+                                 t->generic.base->named.name,
+                                 SW_PROTO_SENDABLE))
+        return 0;
+      for (uint32_t i = 0; i < t->generic.arg_count; i++)
+        if (!is_type_sendable(ctx, t->generic.args[i])) return 0;
+      return 1;
+    }
+    return 0;
+  default:
+    return 0;
+  }
+}
+
+/* Walks the source root once and:
+ *   - infers Sendable for struct/enum declarations whose stored properties
+ *     are all Sendable, registering the conformance in the table
+ *   - diagnoses class declarations that explicitly conform to Sendable
+ *     but have a non-Sendable stored property
+ *
+ * Single-pass — relies on source order for forward references. Mutually
+ * recursive value types remain non-Sendable here, which matches the
+ * expectation that user-visible diagnostics are conservative. */
+void infer_and_check_sendable(SemaContext *ctx, const ASTNode *root) {
+  if (!ctx || !root || !ctx->conformance_table) return;
+  for (const ASTNode *node = root->first_child; node; node = node->next_sibling) {
+    if (node->kind != AST_STRUCT_DECL && node->kind != AST_CLASS_DECL &&
+        node->kind != AST_ENUM_DECL)
+      continue;
+    if (!node->data.var.name_tok) continue;
+    const Token *nt = &ctx->tokens[node->data.var.name_tok];
+    const char *type_name =
+        sema_intern(ctx, ctx->src->data + nt->pos, nt->len);
+    if (!type_name) continue;
+
+    /* Collect stored-property types from the body. */
+    const ASTNode *body = NULL;
+    for (const ASTNode *c = node->first_child; c; c = c->next_sibling)
+      if (c->kind == AST_BLOCK) { body = c; break; }
+    int all_sendable = 1;
+    int has_any_property = 0;
+    const TypeInfo *first_unsendable = NULL;
+    if (body) {
+      for (const ASTNode *m = body->first_child; m; m = m->next_sibling) {
+        if (m->kind != AST_VAR_DECL && m->kind != AST_LET_DECL) continue;
+        if (m->data.var.is_computed) continue;
+        if (m->modifiers & MOD_STATIC) continue;
+        has_any_property = 1;
+        /* Pass 2's resolve_node early-returns on nominal types whose type
+         * is forward-declared; that leaves stored-property TypeInfo
+         * unresolved for struct/class bodies. Force-resolve here. */
+        if (!m->type)
+          resolve_node(ctx, (ASTNode *)m);
+        if (!is_type_sendable(ctx, m->type)) {
+          all_sendable = 0;
+          if (!first_unsendable) first_unsendable = m->type;
+        }
+      }
+    }
+
+    int already_sendable =
+        conformance_table_has(ctx->conformance_table, type_name,
+                              SW_PROTO_SENDABLE);
+
+    if (node->kind == AST_CLASS_DECL) {
+      /* Class only conforms to Sendable when explicitly declared so. If the
+       * user wrote it, stored properties must be Sendable. */
+      if (already_sendable && !all_sendable) {
+        char tn[64];
+        type_to_string(first_unsendable, tn, sizeof(tn));
+        sema_error(ctx, (ASTNode *)node,
+                   "Class '%s' conforms to Sendable but has stored property "
+                   "of non-Sendable type '%s'",
+                   type_name, tn);
+      }
+      continue;
+    }
+
+    /* Struct/enum: auto-Sendable when every stored property is Sendable.
+     * Empty struct/enum (no stored property) trivially Sendable. */
+    if (!already_sendable && (all_sendable || !has_any_property))
+      conformance_table_add(ctx->conformance_table, type_name,
+                            SW_PROTO_SENDABLE);
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════════
  * Builtin member / method lookup — table-driven
  * ═══════════════════════════════════════════════════════════════════════════════
  * Centralised table: (base_kind, member_name) -> result TypeInfo*.

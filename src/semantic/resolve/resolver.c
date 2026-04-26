@@ -691,6 +691,11 @@ int sema_analyze(SemaContext *ctx, ASTNode *root) {
   /* Pass 3 — protocol conformance checking */
   pass3_check_conformances(ctx, root);
 
+  /* Pass 3.5 — Sendable inference for value types + check explicit class
+   * conformance. Runs after pass 3 so stored-property TypeInfo is populated
+   * and any user-declared Sendable conformance is already in the table. */
+  infer_and_check_sendable(ctx, root);
+
   return ctx->error_count == 0 ? 0 : 1;
 }
 

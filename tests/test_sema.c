@@ -655,6 +655,54 @@ static void test_sema_nonisolated_member_always_reachable(void) {
   TEST_PASS();
 }
 
+/* ── Sendable inference (Tier 2.2) ──────────────────────────────────── */
+
+static void test_sema_struct_of_sendable_is_sendable(void) {
+  TEST("struct of Int+String → auto Sendable conformance");
+  TestPipeline tp = {0};
+  pipeline_run(&tp, "struct Pair { var a: Int; var b: String }");
+  const ConformanceTable *ct = sema_conformance_table(tp.sema);
+  ASSERT_NOT_NULL(ct);
+  ASSERT(conformance_table_has(ct, "Pair", "Sendable"));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_struct_with_class_member_not_sendable(void) {
+  TEST("struct holding a class instance → NOT auto Sendable");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "class Bag { }\n"
+               "struct Holder { var b: Bag }");
+  const ConformanceTable *ct = sema_conformance_table(tp.sema);
+  ASSERT_NOT_NULL(ct);
+  ASSERT(!conformance_table_has(ct, "Holder", "Sendable"));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_class_explicit_sendable_with_class_member_rejected(void) {
+  TEST("class : Sendable + non-Sendable stored property → diagnostic");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "class Bag { }\n"
+               "class Wrong: Sendable { var b: Bag = Bag() }");
+  ASSERT(has_error_with(tp.sema, "Sendable", "Bag", NULL));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_empty_enum_is_sendable(void) {
+  TEST("enum without payload → auto Sendable");
+  TestPipeline tp = {0};
+  pipeline_run(&tp, "enum E { case a; case b }");
+  const ConformanceTable *ct = sema_conformance_table(tp.sema);
+  ASSERT_NOT_NULL(ct);
+  ASSERT(conformance_table_has(ct, "E", "Sendable"));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
 /* ── Optional binding (if let) ────────────────────────────────────────────── */
 
 static void test_sema_if_let_binding(void) {
@@ -717,5 +765,9 @@ void run_sema_tests(void) {
   test_sema_actor_member_from_outside_rejected();
   test_sema_actor_member_with_await_ok();
   test_sema_nonisolated_member_always_reachable();
+  test_sema_struct_of_sendable_is_sendable();
+  test_sema_struct_with_class_member_not_sendable();
+  test_sema_class_explicit_sendable_with_class_member_rejected();
+  test_sema_empty_enum_is_sendable();
   test_sema_if_let_binding();
 }
