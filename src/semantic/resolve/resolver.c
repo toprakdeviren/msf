@@ -785,6 +785,10 @@ int check_conformance(const ASTNode *type_decl, const ASTNode *proto_decl,
             continue; /* init? req needs init?/init! */
           if (!req_init_failable && impl_failable)
             continue; /* init req needs non-failable init */
+          if (!validate_witness_func_signature(ctx, type_decl, proto_decl, req,
+                                               impl, type_name, proto_name,
+                                               req_name))
+            all_ok = 0;
           found = 1;
           found_init_impl = impl;
           break;
@@ -832,6 +836,13 @@ int check_conformance(const ASTNode *type_decl, const ASTNode *proto_decl,
                        req_name);
             all_ok = 0;
           }
+        }
+        /* Method requirement: validate full signature (params + return) */
+        if (impl->kind == AST_FUNC_DECL && req->modifiers & (1u << 23)) {
+          if (!validate_witness_func_signature(ctx, type_decl, proto_decl, req,
+                                               impl, type_name, proto_name,
+                                               req_name))
+            all_ok = 0;
         }
         found = 1;
         /*

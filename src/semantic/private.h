@@ -312,6 +312,14 @@ TypeInfo *infer_concrete_at_assoc(const ASTNode *proto_ast, TypeInfo *impl_ty,
 int type_ast_contains_assoc(const ASTNode *type_ast, SemaContext *ctx,
                             const char *assoc_name);
 const char *type_ast_ident_name(const ASTNode *n, SemaContext *ctx);
+const char *param_external_label_str(SemaContext *ctx, const ASTNode *param,
+                                     int *out_omitted);
+int validate_witness_func_signature(SemaContext *ctx, const ASTNode *type_decl,
+                                    const ASTNode *proto_decl,
+                                    const ASTNode *req, const ASTNode *impl,
+                                    const char *type_name,
+                                    const char *proto_name,
+                                    const char *req_name);
 
 /* — Generics (generics.c) ------------------------------------------------- */
 

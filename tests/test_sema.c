@@ -306,6 +306,104 @@ static void test_sema_no_errors_clean_code(void) {
   TEST_PASS();
 }
 
+/* ── Protocol witness signature matching (Tier 1.1) ────────────────────── */
+
+/* Helper: returns 1 if any error message contains all of the given substrings. */
+static int has_error_with(SemaContext *s, const char *a, const char *b,
+                          const char *c) {
+  for (uint32_t i = 0; i < sema_error_count(s); i++) {
+    const char *msg = sema_error_message(s, i);
+    if (!msg) continue;
+    if (a && !strstr(msg, a)) continue;
+    if (b && !strstr(msg, b)) continue;
+    if (c && !strstr(msg, c)) continue;
+    return 1;
+  }
+  return 0;
+}
+
+static void test_sema_witness_happy_path(void) {
+  TEST("witness: happy path, signature matches → no error");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "protocol Drawable { func draw() -> Int }\n"
+               "struct Circle: Drawable { func draw() -> Int { return 1 } }");
+  ASSERT_EQ(sema_error_count(tp.sema), 0);
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_witness_return_type_mismatch(void) {
+  TEST("witness: wrong return type Bool vs Int → diagnostic");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "protocol Drawable { func draw() -> Int }\n"
+               "struct Circle: Drawable { func draw() -> Bool { return true } }");
+  ASSERT(sema_error_count(tp.sema) > 0);
+  ASSERT(has_error_with(tp.sema, "Circle", "Drawable", "Int"));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_witness_param_count_mismatch(void) {
+  TEST("witness: parameter count mismatch → diagnostic");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "protocol P { func f(_ a: Int, _ b: Int) -> Int }\n"
+               "struct S: P { func f(_ a: Int) -> Int { return a } }");
+  ASSERT(sema_error_count(tp.sema) > 0);
+  ASSERT(has_error_with(tp.sema, "S", "P", NULL));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_witness_param_type_mismatch(void) {
+  TEST("witness: parameter type mismatch → diagnostic");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "protocol P { func f(_ x: Int) -> Int }\n"
+               "struct S: P { func f(_ x: String) -> Int { return 0 } }");
+  ASSERT(sema_error_count(tp.sema) > 0);
+  ASSERT(has_error_with(tp.sema, "S", "P", "Int"));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_witness_param_label_mismatch(void) {
+  TEST("witness: parameter label mismatch → diagnostic");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "protocol P { func draw(at p: Int) }\n"
+               "struct S: P { func draw(in p: Int) { } }");
+  ASSERT(sema_error_count(tp.sema) > 0);
+  ASSERT(has_error_with(tp.sema, "S", "P", "label"));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_witness_omitted_label_match(void) {
+  TEST("witness: matching omitted labels (`_ x: Int`) → no error");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "protocol P { func f(_ x: Int) -> Int }\n"
+               "struct S: P { func f(_ y: Int) -> Int { return y } }");
+  ASSERT_EQ(sema_error_count(tp.sema), 0);
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_witness_omitted_vs_named_label(void) {
+  TEST("witness: omitted req vs named impl label → diagnostic");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "protocol P { func f(_ x: Int) -> Int }\n"
+               "struct S: P { func f(x: Int) -> Int { return x } }");
+  ASSERT(sema_error_count(tp.sema) > 0);
+  ASSERT(has_error_with(tp.sema, "S", "P", "label"));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
 /* ── Optional binding (if let) ────────────────────────────────────────────── */
 
 static void test_sema_if_let_binding(void) {
@@ -347,5 +445,12 @@ void run_sema_tests(void) {
   test_sema_dict_type();
   test_sema_undeclared_type_error();
   test_sema_no_errors_clean_code();
+  test_sema_witness_happy_path();
+  test_sema_witness_return_type_mismatch();
+  test_sema_witness_param_count_mismatch();
+  test_sema_witness_param_type_mismatch();
+  test_sema_witness_param_label_mismatch();
+  test_sema_witness_omitted_label_match();
+  test_sema_witness_omitted_vs_named_label();
   test_sema_if_let_binding();
 }
