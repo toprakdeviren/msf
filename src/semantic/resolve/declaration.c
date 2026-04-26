@@ -141,6 +141,37 @@ TypeInfo *resolve_var_decl(SemaContext *ctx, ASTNode *node) {
     sym = sema_lookup(ctx, iname);
   }
 
+  /* Wrapper-backed: synthesise / type the `$x` projection symbol. The symbol
+   * was inserted in pass 1 (declare.c:detect_wrapper_usage) when the wrapper
+   * exposes projectedValue; here we resolve and bind its type. */
+  if (node->data.var.has_wrapper && node->data.var.wrapper_type_tok) {
+    const Token *wt = &ctx->tokens[node->data.var.wrapper_type_tok];
+    const char *wname = sema_intern(ctx, ctx->src->data + wt->pos, wt->len);
+    for (uint32_t wi = 0; wi < ctx->wrapper_count; wi++) {
+      if (ctx->wrapper_types[wi].name != wname) continue;
+      const ASTNode *pv = ctx->wrapper_types[wi].projected_value_node;
+      if (!pv) break;
+      /* The projectedValue's type may not have been resolved yet — force it. */
+      if (!pv->type)
+        resolve_node(ctx, (ASTNode *)pv);
+      if (!pv->type) break;
+      char dollar_buf[64];
+      const Token *nt = &ctx->tokens[node->data.var.name_tok];
+      if (nt->len + 1 >= sizeof(dollar_buf)) break;
+      dollar_buf[0] = '$';
+      memcpy(dollar_buf + 1, ctx->src->data + nt->pos, nt->len);
+      dollar_buf[nt->len + 1] = '\0';
+      const char *dollar_name = sema_intern(ctx, dollar_buf, nt->len + 1);
+      Symbol *dsym = sema_lookup(ctx, dollar_name);
+      if (dsym && !dsym->type) {
+        dsym->type = pv->type;
+      } else if (!dsym) {
+        sema_define(ctx, dollar_name, SYM_VAR, pv->type, (ASTNode *)node);
+      }
+      break;
+    }
+  }
+
   /* Deferred initialization for `let`:
    * If this is a LET_DECL with NO init expression, the variable starts
    * uninitialized. The symbol is marked so that exactly one future assignment

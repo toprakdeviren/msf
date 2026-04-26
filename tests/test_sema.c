@@ -480,6 +480,79 @@ static void test_sema_overload_ambiguity(void) {
   TEST_PASS();
 }
 
+/* ── Property wrapper projected value (Tier 1.3) ──────────────────────── */
+
+static void test_sema_wrapper_projected_basic(void) {
+  TEST("@State var x = 0 → $x is bound with projectedValue type");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "@propertyWrapper struct State<T> {\n"
+               "    var wrappedValue: T\n"
+               "    var projectedValue: Bool { return true }\n"
+               "}\n"
+               "@State var count: Int = 0\n"
+               "let p = $count");
+  /* $count must be looked up successfully and produce a Bool */
+  int found_undeclared = 0;
+  for (uint32_t i = 0; i < sema_error_count(tp.sema); i++) {
+    const char *m = sema_error_message(tp.sema, i);
+    if (m && strstr(m, "$count")) { found_undeclared = 1; break; }
+  }
+  ASSERT(!found_undeclared);
+  const ASTNode *root = tp.root;
+  const ASTNode *p_let = NULL;
+  for (const ASTNode *c = root->first_child; c; c = c->next_sibling) {
+    if ((c->kind == AST_LET_DECL || c->kind == AST_VAR_DECL) &&
+        c->data.var.name_tok) {
+      const Token *t = &tp.ts.tokens[c->data.var.name_tok];
+      if (t->len == 1 && tp.src.data[t->pos] == 'p') { p_let = c; break; }
+    }
+  }
+  ASSERT_NOT_NULL(p_let);
+  ASSERT_EQ(p_let->type, TY_BUILTIN_BOOL);
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_wrapper_missing_wrapped_value(void) {
+  TEST("@propertyWrapper without wrappedValue → diagnostic");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "@propertyWrapper struct Bad {\n"
+               "    var something: Int\n"
+               "}");
+  ASSERT(has_error_with(tp.sema, "Bad", "wrappedValue", NULL));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_wrapper_no_projected_means_no_dollar(void) {
+  TEST("@Wrapper without projectedValue → $x has no symbol bound");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "@propertyWrapper struct Plain<T> {\n"
+               "    var wrappedValue: T\n"
+               "}\n"
+               "@Plain var n: Int = 0\n"
+               "let p = $n");
+  /* Plain has no projectedValue — `$n` should not have been synthesised
+   * as a sibling symbol; the IDENT lookup for `$n` returns nothing and
+   * `let p` ends up with no inferred type. */
+  const ASTNode *root = tp.root;
+  const ASTNode *p_let = NULL;
+  for (const ASTNode *c = root->first_child; c; c = c->next_sibling) {
+    if ((c->kind == AST_LET_DECL || c->kind == AST_VAR_DECL) &&
+        c->data.var.name_tok) {
+      const Token *t = &tp.ts.tokens[c->data.var.name_tok];
+      if (t->len == 1 && tp.src.data[t->pos] == 'p') { p_let = c; break; }
+    }
+  }
+  ASSERT_NOT_NULL(p_let);
+  ASSERT_EQ(p_let->type, NULL);
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
 /* ── Optional binding (if let) ────────────────────────────────────────────── */
 
 static void test_sema_if_let_binding(void) {
@@ -533,5 +606,8 @@ void run_sema_tests(void) {
   test_sema_overload_label_distinguishes();
   test_sema_overload_default_arg_omitted();
   test_sema_overload_ambiguity();
+  test_sema_wrapper_projected_basic();
+  test_sema_wrapper_missing_wrapped_value();
+  test_sema_wrapper_no_projected_means_no_dollar();
   test_sema_if_let_binding();
 }

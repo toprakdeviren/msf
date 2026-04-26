@@ -78,6 +78,12 @@ typedef struct {
   const char *name;
   ASTNode    *decl;
   TypeInfo   *type;
+  /* Member nodes inside the wrapper struct body — captured at register time
+   * so we can answer "what is the type of $x" without re-walking the body
+   * on every use. The pointers reference AST_VAR_DECL/AST_LET_DECL nodes
+   * (or NULL when missing). */
+  const ASTNode *wrapped_value_node;
+  const ASTNode *projected_value_node;
 } WrapperEntry;
 
 /** @brief @resultBuilder registration entry with method availability flags. */

@@ -282,9 +282,35 @@ static void register_property_wrapper(SemaContext *ctx, ASTNode *node,
   if (!find_preceding_attr(ctx, node, SW_ATTR_PROPERTY_WRAPPER)) return;
   if (ctx->wrapper_count >= WRAPPER_TABLE_MAX) return;
 
+  /* Scan the wrapper struct's body for `wrappedValue` and `projectedValue`.
+   * `wrappedValue` is mandatory by Swift's @propertyWrapper contract; missing
+   * it is a diagnostic. `projectedValue` is optional — its presence is what
+   * authorises the synthesised $x sibling-binding for use sites. */
+  const ASTNode *body = find_body(node);
+  const ASTNode *wrapped_node = NULL;
+  const ASTNode *projected_node = NULL;
+  if (body) {
+    for (const ASTNode *m = body->first_child; m; m = m->next_sibling) {
+      if (m->kind != AST_VAR_DECL && m->kind != AST_LET_DECL) continue;
+      if (!m->data.var.name_tok) continue;
+      const char *mn = tok_intern(ctx, m->data.var.name_tok);
+      if (!mn) continue;
+      if (!wrapped_node && strcmp(mn, SW_NAME_WRAPPED_VALUE) == 0)
+        wrapped_node = m;
+      else if (!projected_node && strcmp(mn, SW_NAME_PROJECTED_VALUE) == 0)
+        projected_node = m;
+    }
+  }
+  if (!wrapped_node)
+    sema_error(ctx, node,
+               "Property wrapper '%s' has no '%s' property",
+               iname, SW_NAME_WRAPPED_VALUE);
+
   ctx->wrapper_types[ctx->wrapper_count].name = iname;
   ctx->wrapper_types[ctx->wrapper_count].decl = node;
   ctx->wrapper_types[ctx->wrapper_count].type = ti;
+  ctx->wrapper_types[ctx->wrapper_count].wrapped_value_node = wrapped_node;
+  ctx->wrapper_types[ctx->wrapper_count].projected_value_node = projected_node;
   ctx->wrapper_count++;
 }
 
@@ -358,6 +384,23 @@ static void detect_wrapper_usage(SemaContext *ctx, ASTNode *node) {
       if (strcmp(ctx->wrapper_types[i].name, attr_name) == 0) {
         node->data.var.has_wrapper = 1;
         node->data.var.wrapper_type_tok = sib->data.var.name_tok;
+        /* If the wrapper exposes a projectedValue, synthesise a sibling
+         * symbol named `$x` in the same scope. Type is filled in pass 2,
+         * once the wrapper struct's projectedValue declaration has been
+         * resolved. */
+        if (ctx->wrapper_types[i].projected_value_node &&
+            node->data.var.name_tok) {
+          const Token *nt = &ctx->tokens[node->data.var.name_tok];
+          char dollar_buf[64];
+          if (nt->len + 1 < sizeof(dollar_buf)) {
+            dollar_buf[0] = '$';
+            memcpy(dollar_buf + 1, ctx->src->data + nt->pos, nt->len);
+            dollar_buf[nt->len + 1] = '\0';
+            const char *dollar_name =
+                sema_intern(ctx, dollar_buf, nt->len + 1);
+            sema_define(ctx, dollar_name, SYM_VAR, NULL, node);
+          }
+        }
         break;
       }
     }

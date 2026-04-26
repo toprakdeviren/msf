@@ -58,6 +58,10 @@
 #define SW_ATTR_RESULT_BUILDER   "resultBuilder"
 #define SW_ATTR_MAIN_ACTOR       "MainActor"
 
+/* ── Property-wrapper member names ───────────────────────────────────────── */
+#define SW_NAME_WRAPPED_VALUE   "wrappedValue"
+#define SW_NAME_PROJECTED_VALUE "projectedValue"
+
 /* ── Result builder method names ────────────────────────────────────────────── */
 #define SW_BUILDER_BUILD_BLOCK "buildBlock"
 #define SW_BUILDER_BUILD_EXPRESSION "buildExpression"
