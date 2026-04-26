@@ -140,13 +140,16 @@ const char *param_external_label_str(SemaContext *ctx, const ASTNode *param,
   uint32_t nt = param->data.var.name_tok;
   if (nt >= 1) {
     const Token *prev = &ctx->tokens[nt - 1];
-    if (prev->type == TOK_OPERATOR && prev->len == 1 &&
-        ctx->src->data[prev->pos] == '_') {
+    /* `_` may be lexed as TOK_OPERATOR or TOK_IDENTIFIER depending on
+     * context — match purely on the byte. */
+    if (prev->len == 1 && ctx->src->data[prev->pos] == '_') {
       if (out_omitted)
         *out_omitted = 1;
       return NULL;
     }
-    if (prev->type == TOK_IDENTIFIER)
+    /* An identifier OR a keyword (Swift allows `in`, `at`, etc. as labels)
+     * preceding the internal name is the external label. */
+    if (prev->type == TOK_IDENTIFIER || prev->type == TOK_KEYWORD)
       return sema_intern(ctx, ctx->src->data + prev->pos, prev->len);
   }
   const Token *t = &ctx->tokens[nt];

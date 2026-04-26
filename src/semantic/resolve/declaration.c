@@ -710,7 +710,16 @@ TypeInfo *resolve_func_decl(SemaContext *ctx, ASTNode *node) {
   node->type = ti; /* set early -- stops re-entry via resolve_node guard */
 
   const char *fname = tok_intern(ctx, node->data.func.name_tok);
-  Symbol *sym = sema_lookup(ctx, fname);
+  /* Find the symbol that was registered for THIS decl, not the bucket
+   * head — overloads share a name and we'd otherwise tag the wrong sym. */
+  Symbol *overload_syms[16];
+  uint32_t no = sema_lookup_overloads(ctx, fname, overload_syms, 16);
+  Symbol *sym = NULL;
+  for (uint32_t i = 0; i < no; i++) {
+    if (overload_syms[i]->decl == node) { sym = overload_syms[i]; break; }
+  }
+  if (!sym)
+    sym = sema_lookup(ctx, fname);
   if (sym && !sym->type)
     sym->type = ti;
 

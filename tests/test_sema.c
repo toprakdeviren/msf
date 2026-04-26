@@ -404,6 +404,82 @@ static void test_sema_witness_omitted_vs_named_label(void) {
   TEST_PASS();
 }
 
+/* ── Overload resolution (Tier 1.4) ────────────────────────────────────── */
+
+static void test_sema_overload_int_double_picks_int(void) {
+  TEST("overload: foo(Int)/foo(Double) + Int arg → picks Int");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "func foo(_ x: Int) -> Int { return x }\n"
+               "func foo(_ x: Double) -> Double { return x }\n"
+               "let r = foo(42)");
+  ASSERT_EQ(sema_error_count(tp.sema), 0);
+  const ASTNode *let = find_desc(tp.root, AST_LET_DECL);
+  ASSERT_NOT_NULL(let);
+  ASSERT_EQ(let->type, TY_BUILTIN_INT);
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_overload_int_double_picks_double(void) {
+  TEST("overload: foo(Int)/foo(Double) + Double arg → picks Double");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "func foo(_ x: Int) -> Int { return x }\n"
+               "func foo(_ x: Double) -> Double { return x }\n"
+               "let r = foo(3.14)");
+  ASSERT_EQ(sema_error_count(tp.sema), 0);
+  const ASTNode *let = find_desc(tp.root, AST_LET_DECL);
+  ASSERT_NOT_NULL(let);
+  ASSERT_EQ(let->type, TY_BUILTIN_DOUBLE);
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_overload_label_distinguishes(void) {
+  TEST("overload: f(x: Int) vs f(y: Int) — picks by label");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "func f(x: Int) -> Int { return x }\n"
+               "func f(y: Int) -> String { return \"y\" }\n"
+               "let r = f(y: 1)");
+  ASSERT_EQ(sema_error_count(tp.sema), 0);
+  const ASTNode *let = find_desc(tp.root, AST_LET_DECL);
+  ASSERT_NOT_NULL(let);
+  ASSERT_EQ(let->type, TY_BUILTIN_STRING);
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_overload_default_arg_omitted(void) {
+  TEST("overload: default arg + omitted call → resolves with default");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "func compute(value v: Int = 0, scale s: Double = 1.0) -> Double {\n"
+               "    return Double(v) * s\n"
+               "}\n"
+               "let r = compute(scale: 2.0)");
+  ASSERT_EQ(sema_error_count(tp.sema), 0);
+  const ASTNode *let = find_desc(tp.root, AST_LET_DECL);
+  ASSERT_NOT_NULL(let);
+  ASSERT_EQ(let->type, TY_BUILTIN_DOUBLE);
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_overload_ambiguity(void) {
+  TEST("overload: two implicit-conv candidates tie → ambiguity diagnostic");
+  TestPipeline tp = {0};
+  /* Int literal can convert to Float (cost 1) or Double (cost 1) — tie */
+  pipeline_run(&tp,
+               "func h(_ x: Float) -> Int { return 0 }\n"
+               "func h(_ x: Double) -> String { return \"x\" }\n"
+               "let r = h(42)");
+  ASSERT(has_error_with(tp.sema, "ambiguous", "h", NULL));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
 /* ── Optional binding (if let) ────────────────────────────────────────────── */
 
 static void test_sema_if_let_binding(void) {
@@ -452,5 +528,10 @@ void run_sema_tests(void) {
   test_sema_witness_param_label_mismatch();
   test_sema_witness_omitted_label_match();
   test_sema_witness_omitted_vs_named_label();
+  test_sema_overload_int_double_picks_int();
+  test_sema_overload_int_double_picks_double();
+  test_sema_overload_label_distinguishes();
+  test_sema_overload_default_arg_omitted();
+  test_sema_overload_ambiguity();
   test_sema_if_let_binding();
 }

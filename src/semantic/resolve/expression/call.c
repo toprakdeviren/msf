@@ -5,9 +5,90 @@
  */
 
 #include "../../private.h"
+#include <limits.h>
 
-/*
+/* ── Overload scoring ──────────────────────────────────────────────────────
+ * Scores a single (call site, candidate) pair. Lower score = better fit.
+ * Returns -1 to mean "this candidate is not a match at all" (eliminated).
+ *
+ * Cost model:
+ *   exact type match                          : 0
+ *   integer literal arg → Float/Double param  : 1   (ExpressibleByIntegerLiteral)
+ *   each default-arg slot left unfilled        : 1
+ *   anything else                              : eliminated
+ *
+ * Label rules:
+ *   param has explicit `_`                    : arg must have NO label
+ *   param has external label "L"              : arg label must be "L" (or
+ *                                                arg has no label, treated
+ *                                                as positional in Swift —
+ *                                                eliminated for safety here)
+ *   param's internal name doubles as label    : arg label must equal it OR
+ *                                                arg has no label
  */
+#define OVERLOAD_NO_MATCH (-1)
+
+static int score_overload_candidate(SemaContext *ctx, const ASTNode *decl,
+                                    ASTNode **args, uint32_t argc) {
+  uint32_t param_count = 0;
+  uint32_t with_default = 0;
+  for (const ASTNode *p = decl->first_child; p; p = p->next_sibling) {
+    if (p->kind != AST_PARAM) continue;
+    param_count++;
+    const ASTNode *ty_n = find_type_child(p);
+    int has_default = 0;
+    for (const ASTNode *c = p->first_child; c; c = c->next_sibling) {
+      if (c == ty_n) continue;
+      if (c->kind == AST_OWNERSHIP_SPEC) continue;
+      has_default = 1;
+      break;
+    }
+    if (has_default) with_default++;
+  }
+  if (argc > param_count) return OVERLOAD_NO_MATCH;
+  if (argc + with_default < param_count) return OVERLOAD_NO_MATCH;
+
+  int score = 0;
+  uint32_t arg_idx = 0;
+  for (const ASTNode *p = decl->first_child; p; p = p->next_sibling) {
+    if (p->kind != AST_PARAM) continue;
+    if (arg_idx >= argc) {
+      score += 1; /* default-filled slot */
+      continue;
+    }
+
+    int p_omitted = 0;
+    const char *p_label = param_external_label_str(ctx, p, &p_omitted);
+    const ASTNode *arg = args[arg_idx];
+    const char *arg_label = NULL;
+    if (arg->arg_label_tok) {
+      const Token *t = &ctx->tokens[arg->arg_label_tok];
+      arg_label = sema_intern(ctx, ctx->src->data + t->pos, t->len);
+    }
+    if (p_omitted) {
+      if (arg_label) return OVERLOAD_NO_MATCH;
+    } else if (p_label) {
+      if (arg_label && strcmp(arg_label, p_label) != 0)
+        return OVERLOAD_NO_MATCH;
+      if (!arg_label) return OVERLOAD_NO_MATCH;
+    }
+
+    TypeInfo *p_ty = p->type;
+    TypeInfo *a_ty = arg->type;
+    if (!p_ty || !a_ty) {
+      score += 1;
+    } else if (type_equal(p_ty, a_ty)) {
+      /* exact match */
+    } else if (arg->kind == AST_INTEGER_LITERAL &&
+               (p_ty == TY_BUILTIN_DOUBLE || p_ty == TY_BUILTIN_FLOAT)) {
+      score += 1;
+    } else {
+      return OVERLOAD_NO_MATCH;
+    }
+    arg_idx++;
+  }
+  return score;
+}
 
 TypeInfo *resolve_call_expr(SemaContext *ctx, ASTNode *node) {
   ASTNode *callee = node->first_child;
@@ -104,46 +185,57 @@ TypeInfo *resolve_call_expr(SemaContext *ctx, ASTNode *node) {
   }
 
   /*
-   * Overload resolution: when callee is bare name, pick best matching overload
-   * by param count + types. Use decl's AST_PARAM children for param types (sema
-   * does not fill TypeInfo.func.params).
+   * Overload resolution: when callee is a bare name, pick the best matching
+   * overload by scoring each candidate. Lowest score wins; tied lowest scores
+   * → ambiguity diagnostic.
    */
   if (callee && callee->kind == AST_IDENT_EXPR) {
     const char *cname = tok_intern(ctx, callee->tok_idx);
     Symbol *overloads[16];
     uint32_t n = sema_lookup_overloads(ctx, cname, overloads, 16);
-    if (n > 0) {
+    if (n > 1) {
+      ASTNode *args[16];
       uint32_t argc = 0;
-      TypeInfo *arg_types[16];
       for (ASTNode *a = callee->next_sibling; a && argc < 16;
-           a = a->next_sibling, argc++)
-        arg_types[argc] = a->type;
+           a = a->next_sibling)
+        args[argc++] = a;
+
+      int best_score = INT_MAX;
+      int best_count = 0;
+      int best_idx = -1;
       for (uint32_t i = 0; i < n; i++) {
-        const ASTNode *decl = overloads[i]->decl;
-        if (!decl)
-          continue;
-        uint32_t param_count = 0;
-        for (const ASTNode *p = decl->first_child; p; p = p->next_sibling)
-          if (p->kind == AST_PARAM)
-            param_count++;
-        if (param_count != argc)
-          continue;
-        int match = 1;
-        uint32_t j = 0;
-        for (const ASTNode *p = decl->first_child; p && match;
-             p = p->next_sibling) {
-          if (p->kind != AST_PARAM)
-            continue;
-          if (j >= argc || !arg_types[j] || !p->type ||
-              !type_equal(p->type, arg_types[j]))
-            match = 0;
-          j++;
+        if (!overloads[i]->decl) continue;
+        int s = score_overload_candidate(ctx, overloads[i]->decl, args, argc);
+        if (s < 0) continue;
+        if (s < best_score) {
+          best_score = s;
+          best_count = 1;
+          best_idx = (int)i;
+        } else if (s == best_score) {
+          best_count++;
         }
-        if (match && j == argc) {
-          callee->type = overloads[i]->type;
-          node->data.call.resolved_callee_decl = overloads[i]->decl;
-          callee_t = overloads[i]->type;
-          break;
+      }
+      if (best_count == 1 && best_idx >= 0) {
+        callee->type = overloads[best_idx]->type;
+        node->data.call.resolved_callee_decl = overloads[best_idx]->decl;
+        callee_t = overloads[best_idx]->type;
+      } else if (best_count > 1) {
+        sema_error(ctx, node, "ambiguous use of '%s'", cname);
+      }
+    } else if (n == 1) {
+      /* Single overload — score for label/type match; if accepted, hook decl */
+      ASTNode *args[16];
+      uint32_t argc = 0;
+      for (ASTNode *a = callee->next_sibling; a && argc < 16;
+           a = a->next_sibling)
+        args[argc++] = a;
+      if (overloads[0]->decl) {
+        int s =
+            score_overload_candidate(ctx, overloads[0]->decl, args, argc);
+        if (s >= 0) {
+          callee->type = overloads[0]->type;
+          node->data.call.resolved_callee_decl = overloads[0]->decl;
+          callee_t = overloads[0]->type;
         }
       }
     }
