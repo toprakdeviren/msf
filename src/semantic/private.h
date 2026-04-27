@@ -144,6 +144,10 @@ struct SemaContext {
    * method (so cross-actor access can be diagnosed). */
   uint8_t        current_isolation_main_actor;
   const ASTNode *current_actor_decl;
+  /* Async context — set inside the body of an `async` function or closure.
+   * Read by AST_AWAIT_EXPR resolution to reject `await` outside an async
+   * scope. */
+  uint8_t        current_function_async;
 
   /* Two-phase class initialization */
   uint8_t     in_class_init_phase1;

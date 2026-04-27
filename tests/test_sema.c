@@ -864,6 +864,49 @@ static void test_sema_diagnostic_overflow_indicator(void) {
   TEST_PASS();
 }
 
+/* ── Async/await context (Tier 3.4) ──────────────────────────────────── */
+
+static void test_sema_await_in_sync_func_rejected(void) {
+  TEST("await inside non-async func → diagnostic");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "func op() -> Int { return 0 }\n"
+               "func sync() {\n"
+               "    let _ = await op()\n"
+               "}");
+  ASSERT(has_error_with(tp.sema, "await", "async", NULL));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_await_in_async_func_ok(void) {
+  TEST("await inside async func → no diagnostic");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "func op() async -> Int { return 0 }\n"
+               "func work() async {\n"
+               "    let _ = await op()\n"
+               "}");
+  for (uint32_t i = 0; i < sema_error_count(tp.sema); i++) {
+    const char *m = sema_error_message(tp.sema, i);
+    if (m && strstr(m, "await") && strstr(m, "async"))
+      ASSERT(0);
+  }
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_await_at_toplevel_rejected(void) {
+  TEST("await at top level → diagnostic");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "func op() -> Int { return 0 }\n"
+               "let x = await op()");
+  ASSERT(has_error_with(tp.sema, "await", "async", NULL));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
 /* ── Optional binding (if let) ────────────────────────────────────────────── */
 
 static void test_sema_if_let_binding(void) {
@@ -938,5 +981,8 @@ void run_sema_tests(void) {
   test_sema_builder_two_level_nesting();
   test_sema_builder_nested_call_arg_closure();
   test_sema_diagnostic_overflow_indicator();
+  test_sema_await_in_sync_func_rejected();
+  test_sema_await_in_async_func_ok();
+  test_sema_await_at_toplevel_rejected();
   test_sema_if_let_binding();
 }

@@ -787,6 +787,8 @@ TypeInfo *resolve_func_decl(SemaContext *ctx, ASTNode *node) {
    * even inside a MainActor type. */
   uint8_t saved_isolation = ctx->current_isolation_main_actor;
   const ASTNode *saved_actor = ctx->current_actor_decl;
+  uint8_t saved_async = ctx->current_function_async;
+  ctx->current_function_async = (node->modifiers & MOD_ASYNC) ? 1 : 0;
   if (node->modifiers & MOD_NONISOLATED) {
     ctx->current_isolation_main_actor = 0;
     ctx->current_actor_decl = NULL;
@@ -848,6 +850,7 @@ TypeInfo *resolve_func_decl(SemaContext *ctx, ASTNode *node) {
   }
   ctx->current_isolation_main_actor = saved_isolation;
   ctx->current_actor_decl = saved_actor;
+  ctx->current_function_async = saved_async;
   ctx->current_func_decl = NULL;
   /* restore opaque return state */
   ctx->opaque_return_constraint = saved_opaque_constraint;

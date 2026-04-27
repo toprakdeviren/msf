@@ -444,6 +444,10 @@ TypeInfo *resolve_node_expr(SemaContext *ctx, ASTNode *node) {
   case AST_CONSUME_EXPR:
     return (node->type = resolve_node(ctx, node->first_child));
   case AST_AWAIT_EXPR: {
+    if (!ctx->current_function_async) {
+      sema_error(ctx, node,
+                 "'await' is only allowed inside an async function or closure");
+    }
     TypeInfo *inner_t = resolve_node(ctx, node->first_child);
     if (inner_t && inner_t->kind == TY_FUNC)
       inner_t = inner_t->func.ret ? inner_t->func.ret : TY_BUILTIN_VOID;
