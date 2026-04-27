@@ -703,6 +703,58 @@ static void test_sema_empty_enum_is_sendable(void) {
   TEST_PASS();
 }
 
+/* ── Generic constraint validation (Tier 2.6) ─────────────────────────── */
+
+static void test_sema_generic_constraint_struct_rejected(void) {
+  TEST("where T: SomeStruct → diagnostic (struct is not class/protocol)");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "struct Box { var x: Int }\n"
+               "func f<T>(_ x: T) where T: Box { }");
+  ASSERT(has_error_with(tp.sema, "Box", "class or protocol", NULL));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_generic_constraint_int_rejected(void) {
+  TEST("where T: Int → diagnostic (builtin is not class/protocol)");
+  TestPipeline tp = {0};
+  pipeline_run(&tp, "func f<T>(_ x: T) where T: Int { }");
+  ASSERT(has_error_with(tp.sema, "Int", "class or protocol", NULL));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_generic_constraint_protocol_ok(void) {
+  TEST("where T: SomeProtocol → no error");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "protocol P { }\n"
+               "func f<T>(_ x: T) where T: P { }");
+  for (uint32_t i = 0; i < sema_error_count(tp.sema); i++) {
+    const char *m = sema_error_message(tp.sema, i);
+    if (m && strstr(m, "class or protocol"))
+      ASSERT(0);
+  }
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_generic_constraint_class_ok(void) {
+  TEST("where T: SomeClass → no error (superclass constraint)");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "class Base { }\n"
+               "func f<T>(_ x: T) where T: Base { }");
+  for (uint32_t i = 0; i < sema_error_count(tp.sema); i++) {
+    const char *m = sema_error_message(tp.sema, i);
+    if (m && strstr(m, "class or protocol"))
+      ASSERT(0);
+  }
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
 /* ── Optional binding (if let) ────────────────────────────────────────────── */
 
 static void test_sema_if_let_binding(void) {
@@ -769,5 +821,9 @@ void run_sema_tests(void) {
   test_sema_struct_with_class_member_not_sendable();
   test_sema_class_explicit_sendable_with_class_member_rejected();
   test_sema_empty_enum_is_sendable();
+  test_sema_generic_constraint_struct_rejected();
+  test_sema_generic_constraint_int_rejected();
+  test_sema_generic_constraint_protocol_ok();
+  test_sema_generic_constraint_class_ok();
   test_sema_if_let_binding();
 }

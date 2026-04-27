@@ -95,22 +95,64 @@ TypeInfo *resolve_node(SemaContext *ctx, ASTNode *node) {
       const ASTNode *rhs = lhs ? lhs->next_sibling : NULL;
       TypeInfo *lhs_t = lhs ? resolve_node(ctx, lhs) : NULL;
       TypeInfo *rhs_t = rhs ? resolve_type_annotation(ctx, rhs) : NULL;
-      /* Conformance requirement (where T: Protocol) — add TC_CONFORMANCE */
+      /* `where T: Int` etc. — RHS resolved to a builtin scalar singleton.
+       * Builtins are never classes or protocols. Reject directly. */
+      if (c->data.binary.op_tok == 0 && lhs_t &&
+          lhs_t->kind == TY_GENERIC_PARAM && rhs_t &&
+          rhs_t->kind != TY_NAMED && rhs_t->kind != TY_PROTOCOL_COMPOSITION) {
+        char rs[64];
+        type_to_string(rhs_t, rs, sizeof(rs));
+        sema_error(ctx, c,
+                   "type '%s' is not a class or protocol — invalid generic "
+                   "constraint",
+                   rs);
+      }
+      /* `where T: <RHS>` requirement — validate the RHS form before
+       * recording the constraint. RHS must be a protocol (→ TC_CONFORMANCE)
+       * or a class (→ TC_SUPERCLASS). Concrete value types or builtin
+       * scalars are not legal as a type-parameter bound. */
       if (c->data.binary.op_tok == 0 && lhs_t &&
           lhs_t->kind == TY_GENERIC_PARAM && rhs_t && rhs_t->kind == TY_NAMED &&
           rhs_t->named.name) {
-        uint32_t n = lhs_t->param.constraint_count;
-        TypeConstraint *new_c =
-            realloc(lhs_t->param.constraints, (n + 1) * sizeof(TypeConstraint));
-        if (new_c) {
-          lhs_t->param.constraints = new_c;
-          lhs_t->param.constraints[n].kind = TC_CONFORMANCE;
-          lhs_t->param.constraints[n].protocol_name = rhs_t->named.name;
-          lhs_t->param.constraints[n].rhs_type = NULL;
-          lhs_t->param.constraints[n].assoc_name = NULL;
-          lhs_t->param.constraints[n].rhs_param_name = NULL;
-          lhs_t->param.constraints[n].rhs_assoc_name = NULL;
-          lhs_t->param.constraint_count++;
+        const Symbol *rsym = sema_lookup(ctx, rhs_t->named.name);
+        SymbolKind rk = rsym ? rsym->kind : SYM_TYPE;
+        int valid_proto = (rsym && rk == SYM_PROTOCOL);
+        int valid_class = (rsym && rk == SYM_CLASS);
+        /* Treat unresolved names as protocol for backwards-compat (the
+         * existing code accepted them). Only flag clearly non-class /
+         * non-protocol decls. */
+        int invalid = rsym && !valid_proto && !valid_class &&
+                      (rk == SYM_STRUCT || rk == SYM_ENUM ||
+                       rk == SYM_TYPEALIAS);
+        if (!invalid) {
+          /* No symbol found for the name → check builtins (Int, String,
+           * Bool, etc. — those are not classes or protocols). */
+          if (!rsym) {
+            TypeInfo *bi = resolve_builtin(rhs_t->named.name);
+            if (bi) invalid = 1;
+          }
+        }
+        if (invalid) {
+          sema_error(ctx, c,
+                     "type '%s' is not a class or protocol — invalid generic "
+                     "constraint",
+                     rhs_t->named.name);
+        } else {
+          uint32_t n = lhs_t->param.constraint_count;
+          TypeConstraint *new_c = realloc(
+              lhs_t->param.constraints, (n + 1) * sizeof(TypeConstraint));
+          if (new_c) {
+            lhs_t->param.constraints = new_c;
+            lhs_t->param.constraints[n].kind =
+                valid_class ? TC_SUPERCLASS : TC_CONFORMANCE;
+            lhs_t->param.constraints[n].protocol_name = rhs_t->named.name;
+            lhs_t->param.constraints[n].rhs_type =
+                valid_class ? rhs_t : NULL;
+            lhs_t->param.constraints[n].assoc_name = NULL;
+            lhs_t->param.constraints[n].rhs_param_name = NULL;
+            lhs_t->param.constraints[n].rhs_assoc_name = NULL;
+            lhs_t->param.constraint_count++;
+          }
         }
       }
       /*
