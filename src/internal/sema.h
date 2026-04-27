@@ -72,6 +72,12 @@ uint32_t    sema_error_col(const SemaContext *ctx, uint32_t index);
 /** @brief Returns the conformance table (NULL if sema not initialized). */
 const ConformanceTable *sema_conformance_table(const SemaContext *ctx);
 
+/** @brief Source byte offset where the error at @p index starts (inclusive). */
+uint32_t sema_error_start(const SemaContext *ctx, uint32_t index);
+
+/** @brief Source byte offset where the error at @p index ends (exclusive). */
+uint32_t sema_error_end(const SemaContext *ctx, uint32_t index);
+
 #ifdef __cplusplus
 }
 #endif

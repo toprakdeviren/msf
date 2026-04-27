@@ -724,6 +724,27 @@ uint32_t msf_error_line(const MSFResult *r, uint32_t i);
  */
 uint32_t msf_error_col(const MSFResult *r, uint32_t i);
 
+/**
+ * @brief Returns the source byte offset where the error starts (inclusive).
+ *
+ * For LSP-style highlighting: the [start, end) byte range covers the
+ * smallest AST node responsible for the diagnostic. Parser errors
+ * currently report the same offset for start and end.
+ *
+ * @param r  Analysis result.
+ * @param i  0-based error index.
+ * @return   Byte offset, or 0 if index is out of range.
+ */
+uint32_t msf_error_start_offset(const MSFResult *r, uint32_t i);
+
+/**
+ * @brief Returns the source byte offset where the error ends (exclusive).
+ * @param r  Analysis result.
+ * @param i  0-based error index.
+ * @return   Byte offset, or 0 if index is out of range.
+ */
+uint32_t msf_error_end_offset(const MSFResult *r, uint32_t i);
+
 /* ┌──────────────────────────────────────────────────────────────────────────┐
  * │  8. DUMP — serialize the AST                                             │
  * └──────────────────────────────────────────────────────────────────────────┘

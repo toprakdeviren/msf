@@ -131,6 +131,12 @@ struct SemaContext {
   char     errors[MAX_SEMA_ERRORS][256];
   uint32_t error_line[MAX_SEMA_ERRORS];
   uint32_t error_col[MAX_SEMA_ERRORS];
+  /* Source byte range for each diagnostic (for LSP/highlighting). When
+   * the diagnostic was raised against an AST node, start/end are the
+   * byte offsets of the leftmost and rightmost tokens of that node. A
+   * point diagnostic (no AST context, or token-only) has start == end. */
+  uint32_t error_start[MAX_SEMA_ERRORS];
+  uint32_t error_end[MAX_SEMA_ERRORS];
 
   /* Context state (set during tree walk) */
   TypeInfo    *expected_closure_type;

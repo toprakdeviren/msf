@@ -907,6 +907,41 @@ static void test_sema_await_at_toplevel_rejected(void) {
   TEST_PASS();
 }
 
+/* ── Diagnostic source range (Tier 3.2) ──────────────────────────────── */
+
+static void test_sema_error_range_undeclared_type(void) {
+  TEST("undeclared type → range covers the type identifier");
+  TestPipeline tp = {0};
+  const char *src = "let x: Sring = \"hi\"";
+  pipeline_run(&tp, src);
+  ASSERT(sema_error_count(tp.sema) > 0);
+  uint32_t start = sema_error_start(tp.sema, 0);
+  uint32_t end = sema_error_end(tp.sema, 0);
+  /* The "Sring" token should fall inside [start, end). */
+  ASSERT(end > start);
+  size_t srclen = strlen(src);
+  ASSERT(start < srclen);
+  ASSERT(end <= srclen);
+  /* The slice itself should literally be "Sring". */
+  ASSERT_EQ(end - start, 5);
+  ASSERT(memcmp(src + start, "Sring", 5) == 0);
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_error_range_distinct_per_diagnostic(void) {
+  TEST("two errors at different sites → distinct ranges");
+  TestPipeline tp = {0};
+  const char *src = "let a: Foo = 1\nlet b: Bar = 2";
+  pipeline_run(&tp, src);
+  ASSERT(sema_error_count(tp.sema) >= 2);
+  uint32_t s0 = sema_error_start(tp.sema, 0);
+  uint32_t s1 = sema_error_start(tp.sema, 1);
+  ASSERT(s0 != s1);
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
 /* ── Optional binding (if let) ────────────────────────────────────────────── */
 
 static void test_sema_if_let_binding(void) {
@@ -984,5 +1019,7 @@ void run_sema_tests(void) {
   test_sema_await_in_sync_func_rejected();
   test_sema_await_in_async_func_ok();
   test_sema_await_at_toplevel_rejected();
+  test_sema_error_range_undeclared_type();
+  test_sema_error_range_distinct_per_diagnostic();
   test_sema_if_let_binding();
 }

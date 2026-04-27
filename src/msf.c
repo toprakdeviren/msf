@@ -209,6 +209,21 @@ uint32_t msf_error_col(const MSFResult *r, uint32_t i) {
                   : sema_error_col(r->sema, i - pc);
 }
 
+/** @brief Returns the source byte offset where the error starts. */
+uint32_t msf_error_start_offset(const MSFResult *r, uint32_t i) {
+  if (!r) return 0;
+  uint32_t pc = parser_error_count(r->parser);
+  /* Parser doesn't track byte ranges yet — fall back to 0 for parser errors */
+  return (i < pc) ? 0 : sema_error_start(r->sema, i - pc);
+}
+
+/** @brief Returns the source byte offset where the error ends. */
+uint32_t msf_error_end_offset(const MSFResult *r, uint32_t i) {
+  if (!r) return 0;
+  uint32_t pc = parser_error_count(r->parser);
+  return (i < pc) ? 0 : sema_error_end(r->sema, i - pc);
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════════
  * AST Dump
  * ═══════════════════════════════════════════════════════════════════════════════ */

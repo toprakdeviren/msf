@@ -547,8 +547,8 @@ const char *sema_find_similar_type_name(SemaContext *ctx, const char *name) {
  * gets one of the first MAX_SEMA_ERRORS-1 slots. */
 #define SEMA_OVERFLOW_SLOT (MAX_SEMA_ERRORS - 1)
 
-/* Common tail: stores msg/line/col into ctx, handling overflow into the
- * reserved last slot. Treats `msg` as already formatted. */
+/* Common tail: stores msg/line/col/range into ctx, handling overflow into
+ * the reserved last slot. Treats `msg` as already formatted. */
 static void sema_record(SemaContext *ctx, const ASTNode *node, const char *msg) {
   if (ctx->error_count >= SEMA_OVERFLOW_SLOT) {
     ctx->suppressed_count++;
@@ -558,18 +558,32 @@ static void sema_record(SemaContext *ctx, const ASTNode *node, const char *msg) 
     if (ctx->error_count == SEMA_OVERFLOW_SLOT) {
       ctx->error_line[SEMA_OVERFLOW_SLOT] = 0;
       ctx->error_col[SEMA_OVERFLOW_SLOT] = 0;
+      ctx->error_start[SEMA_OVERFLOW_SLOT] = 0;
+      ctx->error_end[SEMA_OVERFLOW_SLOT] = 0;
       ctx->error_count = SEMA_OVERFLOW_SLOT + 1;
     }
     return;
   }
-  uint32_t line = 0, col = 0;
+  uint32_t line = 0, col = 0, start = 0, end = 0;
   if (node && ctx->tokens) {
     const Token *t = &ctx->tokens[node->tok_idx];
     line = t->line;
     col = t->col;
+    start = t->pos;
+    /* node->tok_end is one-past-the-last token index; if set, the range
+     * extends to the last token's end. Otherwise fall back to the start
+     * token's own length. */
+    if (node->tok_end > node->tok_idx) {
+      const Token *last = &ctx->tokens[node->tok_end - 1];
+      end = last->pos + last->len;
+    } else {
+      end = t->pos + t->len;
+    }
   }
   ctx->error_line[ctx->error_count] = line;
   ctx->error_col[ctx->error_count] = col;
+  ctx->error_start[ctx->error_count] = start;
+  ctx->error_end[ctx->error_count] = end;
   snprintf(ctx->errors[ctx->error_count++], 256, "%s", msg);
 }
 
@@ -722,4 +736,14 @@ uint32_t sema_error_col(const SemaContext *ctx, uint32_t index) {
 /** @brief Returns the conformance table for inspection by callers. */
 const ConformanceTable *sema_conformance_table(const SemaContext *ctx) {
   return ctx ? ctx->conformance_table : NULL;
+}
+
+/** @brief Returns the source byte offset where the error starts. */
+uint32_t sema_error_start(const SemaContext *ctx, uint32_t index) {
+  return (!ctx || index >= ctx->error_count) ? 0 : ctx->error_start[index];
+}
+
+/** @brief Returns the source byte offset where the error ends (exclusive). */
+uint32_t sema_error_end(const SemaContext *ctx, uint32_t index) {
+  return (!ctx || index >= ctx->error_count) ? 0 : ctx->error_end[index];
 }
