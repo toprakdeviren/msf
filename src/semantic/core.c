@@ -25,6 +25,8 @@ uint32_t type_effective_access(SemaContext *ctx, TypeInfo *ty);
 int private_member_visible(SemaContext *ctx, const ASTNode *member_decl,
                                 const ASTNode *owning_type_decl);
 
+static void sema_record(SemaContext *ctx, const ASTNode *node, const char *msg);
+
 /* ═══════════════════════════════════════════════════════════════════════════════
  * Precedence Group Registry
  * ═══════════════════════════════════════════════════════════════════════════════ */
@@ -304,15 +306,15 @@ Symbol *sema_define(SemaContext *ctx, const char *name, SymbolKind kind,
     }
 
     /* Actual redeclaration — report error */
+    char msg[256];
     uint32_t line = 0, col = 0;
     if (decl && ctx->tokens) {
       const Token *t = &ctx->tokens[decl->tok_idx];
       line = t->line;
       col = t->col;
     }
-    if (ctx->error_count < 32)
-      snprintf(ctx->errors[ctx->error_count++], 256,
-               "%u:%u: Redefinition of '%s'", line, col, name);
+    snprintf(msg, sizeof(msg), "%u:%u: Redefinition of '%s'", line, col, name);
+    sema_record(ctx, decl, msg);
     return sym;
   }
 
@@ -541,15 +543,25 @@ const char *sema_find_similar_type_name(SemaContext *ctx, const char *name) {
   return best;
 }
 
-/** @brief Records a semantic error with printf-style formatting. */
-void sema_error(SemaContext *ctx, const ASTNode *node, const char *fmt, ...) {
-  if (ctx->error_count >= 32) return;
-  char msg[256];
-  va_list ap;
-  va_start(ap, fmt);
-  vsnprintf(msg, sizeof(msg), fmt, ap);
-  va_end(ap);
+/* The last slot is reserved for the overflow message; a real diagnostic only
+ * gets one of the first MAX_SEMA_ERRORS-1 slots. */
+#define SEMA_OVERFLOW_SLOT (MAX_SEMA_ERRORS - 1)
 
+/* Common tail: stores msg/line/col into ctx, handling overflow into the
+ * reserved last slot. Treats `msg` as already formatted. */
+static void sema_record(SemaContext *ctx, const ASTNode *node, const char *msg) {
+  if (ctx->error_count >= SEMA_OVERFLOW_SLOT) {
+    ctx->suppressed_count++;
+    snprintf(ctx->errors[SEMA_OVERFLOW_SLOT], 256,
+             "... and %u more diagnostics suppressed",
+             ctx->suppressed_count);
+    if (ctx->error_count == SEMA_OVERFLOW_SLOT) {
+      ctx->error_line[SEMA_OVERFLOW_SLOT] = 0;
+      ctx->error_col[SEMA_OVERFLOW_SLOT] = 0;
+      ctx->error_count = SEMA_OVERFLOW_SLOT + 1;
+    }
+    return;
+  }
   uint32_t line = 0, col = 0;
   if (node && ctx->tokens) {
     const Token *t = &ctx->tokens[node->tok_idx];
@@ -561,10 +573,19 @@ void sema_error(SemaContext *ctx, const ASTNode *node, const char *fmt, ...) {
   snprintf(ctx->errors[ctx->error_count++], 256, "%s", msg);
 }
 
+/** @brief Records a semantic error with printf-style formatting. */
+void sema_error(SemaContext *ctx, const ASTNode *node, const char *fmt, ...) {
+  char msg[256];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(msg, sizeof(msg), fmt, ap);
+  va_end(ap);
+  sema_record(ctx, node, msg);
+}
+
 /** @brief Like sema_error(), but appends " Did you mean 'X'?" when suggestion is non-NULL. */
 void sema_error_suggest(SemaContext *ctx, const ASTNode *node,
                         const char *suggestion, const char *fmt, ...) {
-  if (ctx->error_count >= 32) return;
   char msg[256];
   va_list ap;
   va_start(ap, fmt);
@@ -573,16 +594,7 @@ void sema_error_suggest(SemaContext *ctx, const ASTNode *node,
   if (suggestion && strlen(msg) + 4 + strlen(suggestion) + 2 < sizeof(msg))
     snprintf(msg + strlen(msg), sizeof(msg) - (size_t)strlen(msg),
              " Did you mean '%s'?", suggestion);
-
-  uint32_t line = 0, col = 0;
-  if (node && ctx->tokens) {
-    const Token *t = &ctx->tokens[node->tok_idx];
-    line = t->line;
-    col = t->col;
-  }
-  ctx->error_line[ctx->error_count] = line;
-  ctx->error_col[ctx->error_count] = col;
-  snprintf(ctx->errors[ctx->error_count++], 256, "%s", msg);
+  sema_record(ctx, node, msg);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════════

@@ -21,6 +21,11 @@
 /** @brief Max number of parse errors before silently dropping. */
 #define MAX_PARSE_ERRORS      32
 
+/** @brief Max number of sema diagnostics. The last slot is reserved for an
+ *         "and N more diagnostics suppressed" overflow indicator so callers
+ *         don't mistake a truncated list for "no further errors". */
+#define MAX_SEMA_ERRORS       64
+
 /** @brief Max user-defined precedence groups per source file. */
 #define MAX_PRECEDENCE_GROUPS 32
 

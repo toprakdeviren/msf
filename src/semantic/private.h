@@ -127,9 +127,10 @@ struct SemaContext {
 
   /* Diagnostics */
   uint32_t error_count;
-  char     errors[32][256];
-  uint32_t error_line[32];
-  uint32_t error_col[32];
+  uint32_t suppressed_count;
+  char     errors[MAX_SEMA_ERRORS][256];
+  uint32_t error_line[MAX_SEMA_ERRORS];
+  uint32_t error_col[MAX_SEMA_ERRORS];
 
   /* Context state (set during tree walk) */
   TypeInfo    *expected_closure_type;

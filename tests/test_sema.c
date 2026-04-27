@@ -838,6 +838,32 @@ static void test_sema_builder_nested_call_arg_closure(void) {
   TEST_PASS();
 }
 
+/* ── Diagnostic limit overflow indicator (Tier 3.3) ──────────────────── */
+
+static void test_sema_diagnostic_overflow_indicator(void) {
+  TEST("100 errors → 64 reported, last slot says '... and N more'");
+  TestPipeline tp = {0};
+  /* Build a source with 100 distinct undeclared-type usages — each fires
+   * a sema diagnostic. We expect exactly MAX_SEMA_ERRORS reports, and the
+   * last one to be the overflow message. */
+  char src[8192];
+  size_t off = 0;
+  for (int i = 0; i < 100 && off < sizeof(src) - 64; i++) {
+    int n = snprintf(src + off, sizeof(src) - off, "let x%d: Sring = \"\"\n", i);
+    if (n <= 0) break;
+    off += (size_t)n;
+  }
+  pipeline_run(&tp, src);
+  uint32_t ec = sema_error_count(tp.sema);
+  ASSERT(ec >= 64);
+  ASSERT(ec <= 64);
+  const char *last = sema_error_message(tp.sema, ec - 1);
+  ASSERT_NOT_NULL(last);
+  ASSERT(strstr(last, "more diagnostics suppressed") != NULL);
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
 /* ── Optional binding (if let) ────────────────────────────────────────────── */
 
 static void test_sema_if_let_binding(void) {
@@ -911,5 +937,6 @@ void run_sema_tests(void) {
   test_sema_builder_single_level();
   test_sema_builder_two_level_nesting();
   test_sema_builder_nested_call_arg_closure();
+  test_sema_diagnostic_overflow_indicator();
   test_sema_if_let_binding();
 }
