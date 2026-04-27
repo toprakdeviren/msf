@@ -28,13 +28,34 @@
  */
 #define OVERLOAD_NO_MATCH (-1)
 
+/* Returns 1 if the param's element type matches the arg with at most an
+ * integer-literal-to-Float/Double widening. Updates *score on match. */
+static int score_arg_against(SemaContext *ctx, TypeInfo *p_ty,
+                             const ASTNode *arg, int *score) {
+  TypeInfo *a_ty = arg->type;
+  (void)ctx;
+  if (!p_ty || !a_ty) {
+    *score += 1;
+    return 1;
+  }
+  if (type_equal(p_ty, a_ty)) return 1;
+  if (arg->kind == AST_INTEGER_LITERAL &&
+      (p_ty == TY_BUILTIN_DOUBLE || p_ty == TY_BUILTIN_FLOAT)) {
+    *score += 1;
+    return 1;
+  }
+  return 0;
+}
+
 static int score_overload_candidate(SemaContext *ctx, const ASTNode *decl,
                                     ASTNode **args, uint32_t argc) {
   uint32_t param_count = 0;
   uint32_t with_default = 0;
+  int has_variadic = 0;
   for (const ASTNode *p = decl->first_child; p; p = p->next_sibling) {
     if (p->kind != AST_PARAM) continue;
     param_count++;
+    if (p->modifiers & MOD_VARIADIC) has_variadic = 1;
     const ASTNode *ty_n = find_type_child(p);
     int has_default = 0;
     for (const ASTNode *c = p->first_child; c; c = c->next_sibling) {
@@ -45,13 +66,40 @@ static int score_overload_candidate(SemaContext *ctx, const ASTNode *decl,
     }
     if (has_default) with_default++;
   }
-  if (argc > param_count) return OVERLOAD_NO_MATCH;
-  if (argc + with_default < param_count) return OVERLOAD_NO_MATCH;
+  /* Variadic relaxes the upper bound: argc may exceed param_count because
+   * the trailing variadic slot accepts 0..N arguments. */
+  if (!has_variadic && argc > param_count) return OVERLOAD_NO_MATCH;
+  if (argc + with_default < param_count) {
+    /* Even with a variadic, the non-variadic params must be filled. The
+     * variadic itself contributes one slot to param_count but tolerates
+     * zero arguments, so allow the count to be one short of param_count. */
+    if (!has_variadic ||
+        argc + with_default + 1 < param_count)
+      return OVERLOAD_NO_MATCH;
+  }
 
   int score = 0;
   uint32_t arg_idx = 0;
   for (const ASTNode *p = decl->first_child; p; p = p->next_sibling) {
     if (p->kind != AST_PARAM) continue;
+
+    if (p->modifiers & MOD_VARIADIC) {
+      /* Match the remaining args against this param's element type. Each
+       * extra arg is +0 cost (exact) or +1 (literal widening) so a
+       * non-variadic same-typed candidate still wins ties. */
+      while (arg_idx < argc) {
+        const ASTNode *arg = args[arg_idx];
+        if (arg->arg_label_tok) {
+          /* call-site labels not allowed for individual variadic args */
+          return OVERLOAD_NO_MATCH;
+        }
+        if (!score_arg_against(ctx, p->type, arg, &score))
+          return OVERLOAD_NO_MATCH;
+        arg_idx++;
+      }
+      break;
+    }
+
     if (arg_idx >= argc) {
       score += 1; /* default-filled slot */
       continue;
@@ -73,18 +121,8 @@ static int score_overload_candidate(SemaContext *ctx, const ASTNode *decl,
       if (!arg_label) return OVERLOAD_NO_MATCH;
     }
 
-    TypeInfo *p_ty = p->type;
-    TypeInfo *a_ty = arg->type;
-    if (!p_ty || !a_ty) {
-      score += 1;
-    } else if (type_equal(p_ty, a_ty)) {
-      /* exact match */
-    } else if (arg->kind == AST_INTEGER_LITERAL &&
-               (p_ty == TY_BUILTIN_DOUBLE || p_ty == TY_BUILTIN_FLOAT)) {
-      score += 1;
-    } else {
+    if (!score_arg_against(ctx, p->type, arg, &score))
       return OVERLOAD_NO_MATCH;
-    }
     arg_idx++;
   }
   return score;
@@ -221,6 +259,10 @@ TypeInfo *resolve_call_expr(SemaContext *ctx, ASTNode *node) {
         callee_t = overloads[best_idx]->type;
       } else if (best_count > 1) {
         sema_error(ctx, node, "ambiguous use of '%s'", cname);
+      } else {
+        /* No candidate matched — every overload was eliminated. */
+        sema_error(ctx, node, "no matching overload for call to '%s'", cname);
+        callee_t = NULL;
       }
     } else if (n == 1) {
       /* Single overload — score for label/type match; if accepted, hook decl */

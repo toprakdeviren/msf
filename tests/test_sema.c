@@ -942,6 +942,69 @@ static void test_sema_error_range_distinct_per_diagnostic(void) {
   TEST_PASS();
 }
 
+/* ── Variadic call site (Tier 2.5) ───────────────────────────────────── */
+
+static void test_sema_variadic_zero_args_ok(void) {
+  TEST("variadic with zero args → resolves");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "func sum(_ nums: Int...) -> Int { return 0 }\n"
+               "let r = sum()");
+  for (uint32_t i = 0; i < sema_error_count(tp.sema); i++) {
+    const char *m = sema_error_message(tp.sema, i);
+    if (m && strstr(m, "sum")) ASSERT(0);
+  }
+  const ASTNode *let = find_desc(tp.root, AST_LET_DECL);
+  ASSERT_NOT_NULL(let);
+  ASSERT_EQ(let->type, TY_BUILTIN_INT);
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_variadic_many_args_ok(void) {
+  TEST("variadic with 3 args of element type → resolves");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "func sum(_ nums: Int...) -> Int { return 0 }\n"
+               "let r = sum(1, 2, 3)");
+  const ASTNode *let = find_desc(tp.root, AST_LET_DECL);
+  ASSERT_NOT_NULL(let);
+  ASSERT_EQ(let->type, TY_BUILTIN_INT);
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_variadic_after_fixed_ok(void) {
+  TEST("fixed + variadic mix: f(Int, String...) → resolves");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "func tag(_ id: Int, _ parts: String...) -> Int { return id }\n"
+               "let r = tag(1, \"a\", \"b\")");
+  const ASTNode *let = find_desc(tp.root, AST_LET_DECL);
+  ASSERT_NOT_NULL(let);
+  ASSERT_EQ(let->type, TY_BUILTIN_INT);
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_variadic_type_mismatch_rejected(void) {
+  TEST("variadic with wrong element type → no match");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "func sum(_ nums: Int...) -> Int { return 0 }\n"
+               "func sum(_ tag: String) -> String { return tag }\n"
+               "let r = sum(1, \"a\")");
+  /* Neither overload should match `sum(1, "a")` cleanly:
+   *   - Int... overload: second arg is String, not Int → eliminated
+   *   - String overload: argc=2 > param_count=1, no variadic → eliminated
+   * So r's type should not be assigned (NULL or fallback). */
+  const ASTNode *let = find_desc(tp.root, AST_LET_DECL);
+  ASSERT_NOT_NULL(let);
+  ASSERT_EQ(let->type, NULL);
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
 /* ── Optional binding (if let) ────────────────────────────────────────────── */
 
 static void test_sema_if_let_binding(void) {
@@ -1021,5 +1084,9 @@ void run_sema_tests(void) {
   test_sema_await_at_toplevel_rejected();
   test_sema_error_range_undeclared_type();
   test_sema_error_range_distinct_per_diagnostic();
+  test_sema_variadic_zero_args_ok();
+  test_sema_variadic_many_args_ok();
+  test_sema_variadic_after_fixed_ok();
+  test_sema_variadic_type_mismatch_rejected();
   test_sema_if_let_binding();
 }
