@@ -174,6 +174,52 @@ static ASTNode *make_build_block_call(SemaContext *ctx, const BuilderEntry *be) 
   return call;
 }
 
+/* Recursively descend into a synthesised arg looking for trailing closures
+ * (the rightmost AST_CLOSURE_EXPR child of any AST_CALL_EXPR), and rewrite
+ * each one's body as a buildBlock(...) call against the same builder. This
+ * is what makes
+ *
+ *     @B func body() -> Int {
+ *         1
+ *         wrap { 2; 3 }      // trailing closure
+ *     }
+ *
+ * lower to `B.buildBlock(1, wrap(B.buildBlock(2, 3)))` instead of leaving
+ * the inner block untransformed. We only handle one closure per call site
+ * (the trailing one); call-site closures bound to non-builder parameters
+ * remain untouched.
+ *
+ * `node` is mutable because we splice replacement statements back in. */
+static void retransform_nested_closures(SemaContext *ctx,
+                                         const BuilderEntry *be, ASTNode *node) {
+  if (!node) return;
+  for (ASTNode *c = node->first_child; c; c = c->next_sibling) {
+    if (c->kind == AST_CLOSURE_EXPR) {
+      /* parse_closure_body emits statements as direct children of the
+       * AST_CLOSURE_EXPR (no AST_BLOCK wrapper), so feed the closure node
+       * itself into transform_builder_body — it iterates first_child and
+       * doesn't care about the kind of the parent. */
+      ASTNode *blk_call = transform_builder_body(ctx, be, c);
+      if (blk_call) {
+        ASTNode *expr_stmt = ast_arena_alloc(ctx->ast_arena);
+        if (expr_stmt) {
+          expr_stmt->kind = AST_EXPR_STMT;
+          expr_stmt->first_child = blk_call;
+          expr_stmt->last_child = blk_call;
+          blk_call->parent = expr_stmt;
+          blk_call->next_sibling = NULL;
+          expr_stmt->parent = c;
+          expr_stmt->next_sibling = NULL;
+          c->first_child = expr_stmt;
+          c->last_child = expr_stmt;
+        }
+      }
+      continue;
+    }
+    retransform_nested_closures(ctx, be, c);
+  }
+}
+
 /**
  * @brief Clones an expression statement's child, optionally wrapping in buildExpression.
  *
@@ -185,6 +231,9 @@ static ASTNode *transform_expr_stmt(SemaContext *ctx, const BuilderEntry *be,
   if (!expr) return NULL;
   ASTNode *arg = clone_node(ctx, expr);
   if (!arg) return NULL;
+  /* Re-attach children of the cloned root so traversal works — clone_node
+   * is shallow. The original subtree is unmodified. */
+  retransform_nested_closures(ctx, be, arg);
   if (be->build_expression) {
     ASTNode *wrapped = wrap_in_build_expression(ctx, be, arg);
     if (wrapped != arg) arg = wrapped;

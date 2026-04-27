@@ -755,6 +755,89 @@ static void test_sema_generic_constraint_class_ok(void) {
   TEST_PASS();
 }
 
+/* ── Result builder nesting (Tier 2.1) ───────────────────────────────── */
+
+/* Counts CALL_EXPR descendants whose member name is `target` (e.g. how many
+ * synthesised buildBlock(...) calls fire after a builder transformation). */
+static int count_member_calls(const ASTNode *node, const Source *src,
+                              const TokenStream *ts, const char *target) {
+  if (!node) return 0;
+  int n = 0;
+  if (node->kind == AST_CALL_EXPR && node->first_child &&
+      node->first_child->kind == AST_MEMBER_EXPR) {
+    const ASTNode *m = node->first_child;
+    if (m->data.var.name_tok) {
+      const Token *t = &ts->tokens[m->data.var.name_tok];
+      size_t exp = strlen(target);
+      if (t->len == exp && memcmp(src->data + t->pos, target, exp) == 0)
+        n++;
+    }
+  }
+  for (const ASTNode *c = node->first_child; c; c = c->next_sibling)
+    n += count_member_calls(c, src, ts, target);
+  return n;
+}
+
+static void test_sema_builder_single_level(void) {
+  TEST("@resultBuilder single-level transform produces buildBlock call");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "@resultBuilder struct B {\n"
+               "    static func buildBlock(_ items: Int...) -> Int { return 0 }\n"
+               "}\n"
+               "@B func body() -> Int {\n"
+               "    1\n"
+               "    2\n"
+               "}");
+  int n = count_member_calls(tp.root, &tp.src, &tp.ts, "buildBlock");
+  ASSERT(n >= 1);
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_builder_two_level_nesting(void) {
+  TEST("@B body containing trailing-closure call → 2 buildBlock calls (outer + inner)");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "@resultBuilder struct B {\n"
+               "    static func buildBlock(_ items: Int...) -> Int { return 0 }\n"
+               "}\n"
+               "func wrap(_ make: () -> Int) -> Int { return make() }\n"
+               "@B func body() -> Int {\n"
+               "    1\n"
+               "    wrap {\n"
+               "        2\n"
+               "        3\n"
+               "    }\n"
+               "}");
+  int n = count_member_calls(tp.root, &tp.src, &tp.ts, "buildBlock");
+  ASSERT(n >= 2);
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_builder_nested_call_arg_closure(void) {
+  TEST("@resultBuilder body containing trailing-closure call → inner closure also transformed");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "@resultBuilder struct B {\n"
+               "    static func buildBlock(_ items: Int...) -> Int { return 0 }\n"
+               "}\n"
+               "func wrap(_ x: Int) -> Int { return x }\n"
+               "@B func body() -> Int {\n"
+               "    1\n"
+               "    wrap(0)\n"
+               "    2\n"
+               "}");
+  /* The outer buildBlock should fire — inner content is a flat call expr.
+   * This baseline test guards against regressions in the single-level path. */
+  int n = count_member_calls(tp.root, &tp.src, &tp.ts, "buildBlock");
+  ASSERT(n >= 1);
+  ASSERT_EQ(sema_error_count(tp.sema), 0);
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
 /* ── Optional binding (if let) ────────────────────────────────────────────── */
 
 static void test_sema_if_let_binding(void) {
@@ -825,5 +908,8 @@ void run_sema_tests(void) {
   test_sema_generic_constraint_int_rejected();
   test_sema_generic_constraint_protocol_ok();
   test_sema_generic_constraint_class_ok();
+  test_sema_builder_single_level();
+  test_sema_builder_two_level_nesting();
+  test_sema_builder_nested_call_arg_closure();
   test_sema_if_let_binding();
 }

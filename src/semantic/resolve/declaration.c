@@ -819,6 +819,22 @@ TypeInfo *resolve_func_decl(SemaContext *ctx, ASTNode *node) {
       if (be) {
         ASTNode *blk_call = transform_builder_body(ctx, be, c);
         if (blk_call) {
+          /* Stitch the synthesised buildBlock(...) call back into the body
+           * as its sole statement, replacing whatever sequence of stmts the
+           * user wrote. Wrapping in an EXPR_STMT keeps downstream walkers
+           * (which expect a block of stmts) happy. */
+          ASTNode *expr_stmt = ast_arena_alloc(ctx->ast_arena);
+          if (expr_stmt) {
+            expr_stmt->kind = AST_EXPR_STMT;
+            expr_stmt->first_child = blk_call;
+            expr_stmt->last_child = blk_call;
+            blk_call->parent = expr_stmt;
+            blk_call->next_sibling = NULL;
+            expr_stmt->parent = c;
+            expr_stmt->next_sibling = NULL;
+            ((ASTNode *)c)->first_child = expr_stmt;
+            ((ASTNode *)c)->last_child = expr_stmt;
+          }
           resolve_node(ctx, blk_call);
           if (!ret_t && blk_call->type)
             ret_t = blk_call->type;
