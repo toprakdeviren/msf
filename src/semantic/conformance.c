@@ -239,6 +239,37 @@ void infer_and_check_sendable(SemaContext *ctx, const ASTNode *root) {
   }
 }
 
+/* Walks the AST and, for every AST_CLOSURE_EXPR explicitly annotated as
+ * @Sendable (`{ @Sendable in ... }`), checks that every captured value's
+ * type is Sendable. Runs after infer_and_check_sendable so user-defined
+ * value types have already been registered. */
+static void check_sendable_closures_rec(SemaContext *ctx, const ASTNode *node) {
+  if (!node) return;
+  if (node->kind == AST_CLOSURE_EXPR && (node->modifiers & MOD_SENDABLE)) {
+    const CaptureList *captures = (const CaptureList *)node->data.closure.captures;
+    if (captures) {
+      for (uint32_t i = 0; i < captures->count; i++) {
+        const CaptureInfo *ci = &captures->captures[i];
+        if (!ci->type) continue;
+        if (!is_type_sendable(ctx, ci->type)) {
+          char ts[64];
+          type_to_string(ci->type, ts, sizeof(ts));
+          sema_error(ctx, (ASTNode *)node,
+                     "Capture of '%s' with non-Sendable type '%s' in a "
+                     "@Sendable closure",
+                     ci->name ? ci->name : "?", ts);
+        }
+      }
+    }
+  }
+  for (const ASTNode *c = node->first_child; c; c = c->next_sibling)
+    check_sendable_closures_rec(ctx, c);
+}
+
+void check_sendable_closures(SemaContext *ctx, const ASTNode *root) {
+  check_sendable_closures_rec(ctx, root);
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════════
  * Builtin member / method lookup — table-driven
  * ═══════════════════════════════════════════════════════════════════════════════

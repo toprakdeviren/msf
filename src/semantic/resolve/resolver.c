@@ -295,6 +295,8 @@ TypeInfo *resolve_node(SemaContext *ctx, ASTNode *node) {
     CaptureList *captures = malloc(sizeof(CaptureList));
     identify_captures(node, ctx, captures);
     node->data.closure.captures = captures;
+    /* Sendable capture check fires after Sendable inference (pass 3.5),
+     * so the conformance table has user-defined value types in it by then. */
 
     return (node->type = ti);
   }
@@ -737,6 +739,12 @@ int sema_analyze(SemaContext *ctx, ASTNode *root) {
    * conformance. Runs after pass 3 so stored-property TypeInfo is populated
    * and any user-declared Sendable conformance is already in the table. */
   infer_and_check_sendable(ctx, root);
+
+  /* Pass 4 — @Sendable closure capture analysis. Walks the resolved tree
+   * and, for every closure annotated `{ @Sendable in ... }`, verifies its
+   * captured values' types are Sendable. Runs after Sendable inference so
+   * user-defined value types are already in the table. */
+  check_sendable_closures(ctx, root);
 
   return ctx->error_count == 0 ? 0 : 1;
 }

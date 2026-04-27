@@ -18,8 +18,9 @@ static uint32_t consume_type_attributes(Parser *p) {
          p->src->data[p_tok(p)->pos] == '@') {
     adv(p);
     if (p_tok(p)->type == TOK_IDENTIFIER) {
-      if (p_is_ident_str(p, CK_ESCAPING))       mods |= MOD_ESCAPING;
+      if (p_is_ident_str(p, CK_ESCAPING))         mods |= MOD_ESCAPING;
       else if (p_is_ident_str(p, CK_AUTOCLOSURE)) mods |= MOD_AUTOCLOSURE;
+      else if (p_is_ident_str(p, "Sendable"))     mods |= MOD_SENDABLE;
       adv(p);
     }
   }

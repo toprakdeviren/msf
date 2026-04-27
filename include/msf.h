@@ -860,6 +860,11 @@ void msf_dump_sexpr(const MSFResult *r, FILE *out);
 #define MOD_BORROWING                     (1u << 22)
 #define MOD_CONSUMING                     (1u << 23)
 
+/* — @Sendable on closure / function type (shares bit 23 with the capture
+ *   mode and MOD_CONSUMING, but lives on AST_CLOSURE_EXPR / AST_TYPE_FUNC
+ *   nodes — different AST kinds, so the overlap is harmless). */
+#define MOD_SENDABLE                      (1u << 23)
+
 /* ┌──────────────────────────────────────────────────────────────────────────┐
  * │  10. TYPE ARENA — chunked allocator for TypeInfo                       │
  * └──────────────────────────────────────────────────────────────────────────┘

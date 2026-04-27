@@ -1005,6 +1005,50 @@ static void test_sema_variadic_type_mismatch_rejected(void) {
   TEST_PASS();
 }
 
+/* ── @Sendable closure capture (Tier 2.2 part 2) ─────────────────────── */
+
+static void test_sema_sendable_closure_captures_class_rejected(void) {
+  TEST("@Sendable closure capturing a class instance → diagnostic");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "class Bag { var x: Int = 0 }\n"
+               "let obj = Bag()\n"
+               "let f = { @Sendable in let _ = obj }");
+  ASSERT(has_error_with(tp.sema, "non-Sendable", "@Sendable", NULL));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_sendable_closure_captures_struct_ok(void) {
+  TEST("@Sendable closure capturing a Sendable struct → no diagnostic");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "struct Pair { var a: Int; var b: Int }\n"
+               "let s: Pair = Pair(a: 1, b: 2)\n"
+               "let f = { @Sendable in let _ = s }");
+  for (uint32_t i = 0; i < sema_error_count(tp.sema); i++) {
+    const char *m = sema_error_message(tp.sema, i);
+    if (m && strstr(m, "non-Sendable")) ASSERT(0);
+  }
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_plain_closure_ignores_sendable_check(void) {
+  TEST("non-@Sendable closure capturing class → no diagnostic");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "class Bag { var x: Int = 0 }\n"
+               "let obj = Bag()\n"
+               "let f = { let _ = obj }");
+  for (uint32_t i = 0; i < sema_error_count(tp.sema); i++) {
+    const char *m = sema_error_message(tp.sema, i);
+    if (m && strstr(m, "non-Sendable")) ASSERT(0);
+  }
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
 /* ── Optional binding (if let) ────────────────────────────────────────────── */
 
 static void test_sema_if_let_binding(void) {
@@ -1088,5 +1132,8 @@ void run_sema_tests(void) {
   test_sema_variadic_many_args_ok();
   test_sema_variadic_after_fixed_ok();
   test_sema_variadic_type_mismatch_rejected();
+  test_sema_sendable_closure_captures_class_rejected();
+  test_sema_sendable_closure_captures_struct_ok();
+  test_sema_plain_closure_ignores_sendable_check();
   test_sema_if_let_binding();
 }

@@ -175,6 +175,19 @@ ASTNode *parse_closure_body(Parser *p) {
   cl->tok_idx = (uint32_t)p->pos;
   adv(p); /* '{' */
 
+  /* Closure attributes — Swift allows `{ @Sendable in body }` and
+   * `{ @MainActor in body }`. Recognise @Sendable here (the rest fold
+   * into modifiers driven from the function-type side). */
+  while (!p_is_eof(p) && p_tok(p)->type == TOK_OPERATOR &&
+         p->src->data[p_tok(p)->pos] == '@') {
+    adv(p); /* '@' */
+    if (p_tok(p)->type == TOK_IDENTIFIER) {
+      if (p_is_ident_str(p, "Sendable"))
+        cl->modifiers |= MOD_SENDABLE;
+      adv(p);
+    }
+  }
+
   parse_closure_capture_list(p, cl);
   parse_closure_signature(p, cl);
 
