@@ -439,8 +439,23 @@ TypeInfo *resolve_node_expr(SemaContext *ctx, ASTNode *node) {
       return (node->type = opt_t->inner);
     return (node->type = opt_t);
   }
-  case AST_TRY_EXPR:
-    return (node->type = resolve_node(ctx, node->first_child));
+  case AST_TRY_EXPR: {
+    TypeInfo *inner_t = resolve_node(ctx, node->first_child);
+    /* try? wraps the result in Optional<T>; the parser stamps MOD_WEAK
+     * on the AST_TRY_EXPR node when the user wrote `try?`. Without this
+     * wrap, downstream code (most visibly `??`) sees a bare T and rejects
+     * the LHS as non-Optional. `try!` and bare `try` keep the inner
+     * result type — failure paths trap or propagate. */
+    if (inner_t && (node->modifiers & MOD_WEAK)) {
+      TypeInfo *opt = type_arena_alloc(ctx->type_arena);
+      if (opt) {
+        opt->kind = TY_OPTIONAL;
+        opt->inner = inner_t;
+        return (node->type = opt);
+      }
+    }
+    return (node->type = inner_t);
+  }
   case AST_CONSUME_EXPR:
     return (node->type = resolve_node(ctx, node->first_child));
   case AST_AWAIT_EXPR: {
