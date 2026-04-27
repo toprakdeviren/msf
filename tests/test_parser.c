@@ -240,6 +240,73 @@ static void test_parse_import(void) {
   TEST_PASS();
 }
 
+/* ── Custom operator precedence (Tier 2.4) ───────────────────────────── */
+
+/* Find the first BINARY_EXPR descendant */
+static const ASTNode *find_first_binary(const ASTNode *node) {
+  if (!node) return NULL;
+  if (node->kind == AST_BINARY_EXPR) return node;
+  for (const ASTNode *c = node->first_child; c; c = c->next_sibling) {
+    const ASTNode *r = find_first_binary(c);
+    if (r) return r;
+  }
+  return NULL;
+}
+
+/* Returns the operator-token's text length (for distinguishing + vs <+>) */
+static int binary_op_text_eq(const ASTNode *bin, const Source *src,
+                             const TokenStream *ts, const char *expected) {
+  if (!bin || !bin->data.binary.op_tok) return 0;
+  const Token *t = &ts->tokens[bin->data.binary.op_tok];
+  size_t exp = strlen(expected);
+  return t->len == exp && memcmp(src->data + t->pos, expected, exp) == 0;
+}
+
+static void test_parse_custom_op_higher_than_addition(void) {
+  TEST("custom <+> higherThan: AdditionPrecedence — `1 + 2 <+> 3` = `1 + (2 <+> 3)`");
+  Source src; TokenStream ts; ASTArena arena; Parser *p;
+  ASTNode *root = parse_code(
+      "precedencegroup MyHigher { higherThan: AdditionPrecedence }\n"
+      "infix operator <+> : MyHigher\n"
+      "let r = 1 + 2 <+> 3",
+      &src, &ts, &arena, &p);
+  ASSERT_NOT_NULL(root);
+  const ASTNode *let = find_child(root, AST_LET_DECL);
+  ASSERT_NOT_NULL(let);
+  const ASTNode *top = find_first_binary(let);
+  ASSERT_NOT_NULL(top);
+  ASSERT(binary_op_text_eq(top, &src, &ts, "+"));
+  const ASTNode *rhs = top->first_child ? top->first_child->next_sibling : NULL;
+  ASSERT_NOT_NULL(rhs);
+  ASSERT_EQ(rhs->kind, AST_BINARY_EXPR);
+  ASSERT(binary_op_text_eq(rhs, &src, &ts, "<+>"));
+  cleanup(&ts, &arena, p);
+  TEST_PASS();
+}
+
+static void test_parse_custom_op_lower_than_addition(void) {
+  TEST("custom <-> lowerThan: AdditionPrecedence — `1 + 2 <-> 3` = `(1 + 2) <-> 3`");
+  Source src; TokenStream ts; ASTArena arena; Parser *p;
+  ASTNode *root = parse_code(
+      "precedencegroup MyLower { lowerThan: AdditionPrecedence }\n"
+      "infix operator <-> : MyLower\n"
+      "let r = 1 + 2 <-> 3",
+      &src, &ts, &arena, &p);
+  ASSERT_NOT_NULL(root);
+  const ASTNode *let = find_child(root, AST_LET_DECL);
+  ASSERT_NOT_NULL(let);
+  const ASTNode *top = find_first_binary(let);
+  ASSERT_NOT_NULL(top);
+  /* Top-level operator must be `<->`, with `+` nested in the left child */
+  ASSERT(binary_op_text_eq(top, &src, &ts, "<->"));
+  const ASTNode *lhs = top->first_child;
+  ASSERT_NOT_NULL(lhs);
+  ASSERT_EQ(lhs->kind, AST_BINARY_EXPR);
+  ASSERT(binary_op_text_eq(lhs, &src, &ts, "+"));
+  cleanup(&ts, &arena, p);
+  TEST_PASS();
+}
+
 /* ── Runner ───────────────────────────────────────────────────────────────── */
 
 void run_parser_tests(void) {
@@ -261,4 +328,6 @@ void run_parser_tests(void) {
   test_parse_error_missing_brace();
   test_parse_generic_func();
   test_parse_import();
+  test_parse_custom_op_higher_than_addition();
+  test_parse_custom_op_lower_than_addition();
 }

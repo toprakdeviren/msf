@@ -97,6 +97,33 @@ Token scan_symbol(Lexer *l, const uint8_t *s, uint32_t len, uint8_t c,
   uint8_t raw_tt = LEX_CHAR_TOKEN[c];
   TokenType tt = (raw_tt == TT_OPERATOR) ? TOK_OPERATOR
                : (raw_tt == TT_PUNCT)    ? TOK_PUNCT : TOK_UNKNOWN;
+
+  /* Multi-character operator continuation: when MULTI_OPS didn't match but
+   * the current byte is an operator character, greedily extend with adjacent
+   * operator characters. Lets user-defined infix operators like `<+>`, `<->`,
+   * or `<*>` be lexed as a single token. The MULTI_OPS pre-match above takes
+   * priority so well-known tokens (`==`, `<=`, `&&`, ...) keep their kind.
+   * `<` and `>` are deliberately excluded from continuation in expression
+   * context where ambiguity with comparison + generics would bite, but a
+   * declared custom-op containing them is fine because the parser registers
+   * the symbol and looks up its precedence by full text. */
+  if (tt == TOK_OPERATOR && raw_tt == TT_OPERATOR) {
+    uint32_t end = l->pos + 1;
+    while (end < len) {
+      uint8_t nc = s[end];
+      if (LEX_CHAR_TOKEN[nc] != TT_OPERATOR) break;
+      /* don't merge into a comment opener — `//` and `/*` are higher prio */
+      if (nc == '/' && end + 1 < len && (s[end + 1] == '/' || s[end + 1] == '*'))
+        break;
+      end++;
+    }
+    uint32_t tl = end - l->pos;
+    if (tl > 1) {
+      ADVANCE_BY(l, tl);
+      return (Token){TOK_OPERATOR, sp, tl, sl, sc, KW_NONE, OP_NONE};
+    }
+  }
+
   ADVANCE(l);
   return (Token){tt, sp, 1, sl, sc, KW_NONE, OP_NONE};
 }

@@ -138,15 +138,14 @@ ASTNode *parse_precedence_group_decl(Parser *p) {
  * @param is_infix  If 1, allows a `: PrecedenceGroup` suffix.
  */
 ASTNode *parse_operator_decl(Parser *p, int is_infix) {
-  adv(p);
-  if (!p_is_kw(p, KW_OPERATOR)) {
-    if (p_tok(p)->type == TOK_IDENTIFIER && tok_text_eq(p, "operator", 8))
-      adv(p);
-    else
-      return NULL;
-  } else {
+  /* Caller has consumed the prefix/postfix/infix keyword; we should be
+   * sitting on `operator` (KW_OPERATOR or, in some configurations, an
+   * identifier with that text). */
+  if (p_is_kw(p, KW_OPERATOR) ||
+      (p_tok(p)->type == TOK_IDENTIFIER && tok_text_eq(p, "operator", 8)))
     adv(p);
-  }
+  else
+    return NULL;
   ASTNode *node = alloc_node(p, AST_OPERATOR_DECL);
   if (!node) return NULL;
   node->data.var.name_tok = (uint32_t)p->pos;

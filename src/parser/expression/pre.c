@@ -4,12 +4,61 @@
  */
 #include "../private.h"
 
+/* Built-in Swift stdlib precedence groups, mapped to the same lbp values
+ * that get_infix_prec uses for their associated operators. Used to resolve
+ * `higherThan: <BuiltinGroup>` and `lowerThan: <BuiltinGroup>` references
+ * that custom precedence groups declare against. */
+static int builtin_group_lbp(const char *name) {
+  if (!name) return -1;
+  if (!strcmp(name, "BitwiseShiftPrecedence"))    return 157;
+  if (!strcmp(name, "MultiplicationPrecedence"))  return 150;
+  if (!strcmp(name, "AdditionPrecedence"))        return 140;
+  if (!strcmp(name, "RangeFormationPrecedence"))  return 135;
+  if (!strcmp(name, "CastingPrecedence"))         return 132;
+  if (!strcmp(name, "NilCoalescingPrecedence"))   return 125;
+  if (!strcmp(name, "ComparisonPrecedence"))      return 130;
+  if (!strcmp(name, "LogicalConjunctionPrecedence")) return 120;
+  if (!strcmp(name, "LogicalDisjunctionPrecedence")) return 110;
+  if (!strcmp(name, "DefaultPrecedence"))         return 130;
+  if (!strcmp(name, "TernaryPrecedence"))         return 100;
+  if (!strcmp(name, "AssignmentPrecedence"))      return  90;
+  return -1;
+}
+
+/* Resolves a precedence-group name to its lbp by checking already-registered
+ * user groups first, then the builtin stdlib table. */
+static int lookup_group_lbp(const Parser *p, const char *name) {
+  for (int i = 0; i < p->pg_count; i++)
+    if (p->pg_table[i].name && !strcmp(p->pg_table[i].name, name))
+      return p->pg_table[i].lbp;
+  return builtin_group_lbp(name);
+}
+
+/* Reads a single child of kind AST_PG_GROUP_REF (or its first AST_PG_GROUP_REF
+ * grandchild) and returns the referenced group's lbp, or -1 if unresolved.
+ * higherThan / lowerThan can take a comma-separated list — pick the first. */
+static int first_group_ref_lbp(const Parser *p, const ASTNode *parent) {
+  for (const ASTNode *c = parent->first_child; c; c = c->next_sibling) {
+    if (c->kind != AST_PG_GROUP_REF || !c->data.var.name_tok) continue;
+    const Token *t = &p->ts->tokens[c->data.var.name_tok];
+    char buf[64];
+    size_t len = t->len < 63 ? t->len : 63;
+    memcpy(buf, p->src->data + t->pos, len);
+    buf[len] = '\0';
+    int lbp = lookup_group_lbp(p, buf);
+    if (lbp >= 0) return lbp;
+  }
+  return -1;
+}
+
 /**
  * @brief Registers a parsed precedencegroup declaration into the parser's runtime table.
  *
- * Extracts the group name and associativity from the AST, assigns default
- * binding powers (lbp=130), and adjusts rbp based on associativity
- * (left: rbp=lbp-1, right: rbp=lbp+1, none: rbp=lbp).
+ * Resolves higherThan / lowerThan references against already-registered
+ * user groups and the builtin stdlib precedence table. The custom group's
+ * lbp is anchored to the referenced group's lbp ± 1; if both higher- and
+ * lowerThan are present, higherThan wins. Associativity then decides how
+ * rbp relates to lbp (left: lbp-1, right: lbp+1, none: lbp).
  */
 void register_precedence_group_from_ast(Parser *p, ASTNode *node) {
   if (p->pg_count >= MAX_PRECEDENCE_GROUPS)
@@ -22,7 +71,25 @@ void register_precedence_group_from_ast(Parser *p, ASTNode *node) {
     return;
   memcpy(name, p->src->data + t->pos, (size_t)t->len);
   name[t->len] = '\0';
-  int lbp = 130, rbp = 130;
+
+  int lbp = 130;
+  for (ASTNode *c = node->first_child; c; c = c->next_sibling) {
+    if (c->kind == AST_PG_HIGHER_THAN) {
+      int base = first_group_ref_lbp(p, c);
+      if (base >= 0) { lbp = base + 1; break; }
+    }
+  }
+  /* lowerThan only applied if no higherThan resolved (above kept default). */
+  if (lbp == 130) {
+    for (ASTNode *c = node->first_child; c; c = c->next_sibling) {
+      if (c->kind == AST_PG_LOWER_THAN) {
+        int base = first_group_ref_lbp(p, c);
+        if (base >= 0) { lbp = base - 1; break; }
+      }
+    }
+  }
+
+  int rbp = lbp;
   for (ASTNode *c = node->first_child; c; c = c->next_sibling) {
     if (c->kind == AST_PG_ASSOCIATIVITY) {
       int assoc = (int)c->data.integer.ival; /* 0=left, 1=right, 2=none */
@@ -116,6 +183,18 @@ Prec get_infix_prec(Parser *p) {
     return (Prec){-1, -1};
 
   const Token *t = p_tok(p);
+
+  /* Custom infix operators take priority over the single-char switch below.
+   * A user-declared `<+>` would otherwise hit the `case '<'` arm via its
+   * leading byte and resolve to ComparisonPrecedence (130/131) instead of
+   * its declared precedence group. Multi-byte tokens with op_kind == OP_NONE
+   * are the only candidates — anything classified by MULTI_OPS already has
+   * a non-NONE kind that the switch handles below. */
+  if (t->type == TOK_OPERATOR && t->len > 1 && t->op_kind == OP_NONE) {
+    Prec custom = get_custom_infix_prec(p);
+    if (custom.lbp >= 0)
+      return custom;
+  }
 
   if (t->type == TOK_OPERATOR) {
     /* Multi-char: dispatch by pre-classified op_kind */

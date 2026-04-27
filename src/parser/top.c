@@ -81,13 +81,24 @@ static uint32_t collect_contextual_modifiers(Parser *p) {
   return extra;
 }
 
-/** @brief Handles prefix/postfix/infix operator or function declarations. */
+/** @brief Handles prefix/postfix/infix operator or function declarations.
+ *
+ * `prefix`/`postfix`/`infix` may be lexed as either KW_* keywords or as
+ * contextual identifiers depending on lexer rules; accept either form. */
 static ASTNode *try_parse_fixity_decl(Parser *p, uint32_t mods) {
-  if (p_tok(p)->type != TOK_IDENTIFIER) return NULL;
-  if (!p_is_ck(p, CK_PREFIX) && !p_is_ck(p, CK_POSTFIX) && !p_is_ck(p, CK_INFIX))
+  int is_infix = 0;
+  const Token *t = p_tok(p);
+  if (t->type == TOK_KEYWORD &&
+      (t->keyword == KW_PREFIX || t->keyword == KW_POSTFIX ||
+       t->keyword == KW_INFIX)) {
+    is_infix = (t->keyword == KW_INFIX);
+  } else if (t->type == TOK_IDENTIFIER &&
+             (p_is_ck(p, CK_PREFIX) || p_is_ck(p, CK_POSTFIX) ||
+              p_is_ck(p, CK_INFIX))) {
+    is_infix = p_is_ck(p, CK_INFIX);
+  } else {
     return NULL;
-
-  int is_infix = p_is_ck(p, CK_INFIX);
+  }
   const Token *next = p_peek1(p);
 
   if ((next->type == TOK_KEYWORD && next->keyword == KW_OPERATOR) ||
