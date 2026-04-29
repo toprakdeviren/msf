@@ -55,7 +55,13 @@ static ASTNode *parse_postfix_generic_call(Parser *p, ASTNode *lhs) {
 
     if (depth == 0 && scan + 1 < p->ts->count) {
       const Token *after_gt = &p->ts->tokens[scan + 1];
-      if (after_gt->type == TOK_PUNCT && p->src->data[after_gt->pos] == '(')
+      char c = p->src->data[after_gt->pos];
+      // `Foo<...>(...)` — generic constructor call (TOK_PUNCT '(').
+      // `Foo<...>.method(...)` — generic static-member access; `.` lexes
+      // as TOK_OPERATOR, not TOK_PUNCT, so accept either type for that char.
+      if (c == '(' && after_gt->type == TOK_PUNCT)
+        found_generic_call = 1;
+      else if (c == '.' && after_gt->len == 1)
         found_generic_call = 1;
     }
 
@@ -70,6 +76,11 @@ static ASTNode *parse_postfix_generic_call(Parser *p, ASTNode *lhs) {
         }
         adv(p);
       }
+      // Extend the LHS token range to include the angle-bracketed args so
+      // downstream IR passes can recover the generic specialization (e.g.
+      // map HMAC<SHA384> → __ck_hmac_sha384) by scanning lhs->tok_idx+1
+      // through lhs->tok_end-1 for type-name tokens.
+      lhs->tok_end = (uint32_t)p->pos;
       return lhs;
     }
   }

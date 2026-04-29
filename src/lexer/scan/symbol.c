@@ -107,7 +107,13 @@ Token scan_symbol(Lexer *l, const uint8_t *s, uint32_t len, uint8_t c,
    * context where ambiguity with comparison + generics would bite, but a
    * declared custom-op containing them is fine because the parser registers
    * the symbol and looks up its precedence by full text. */
-  if (tt == TOK_OPERATOR && raw_tt == TT_OPERATOR) {
+  if (tt == TOK_OPERATOR && raw_tt == TT_OPERATOR &&
+      /* Skip greedy extension when the leading byte is `<` or `>` — every
+       * well-known shape (`<<`, `>>`, `<=`, `>=`, `<-`, `->`) lives in
+       * MULTI_OPS and was already tried above. Without this guard, sequences
+       * like `Foo<...>.method` get lexed as one `>.` operator and break
+       * generic-call parsing. */
+      c != '<' && c != '>') {
     uint32_t end = l->pos + 1;
     while (end < len) {
       uint8_t nc = s[end];
