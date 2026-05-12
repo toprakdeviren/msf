@@ -577,6 +577,36 @@ static ASTNode *parse_proto_assoc_req(Parser *p, uint32_t mods) {
   return req;
 }
 
+/** @brief Parses a subscript requirement: subscript(i: Int) -> T { get [set] } */
+static ASTNode *parse_proto_subscript_req(Parser *p, uint32_t mods) {
+  ASTNode *req = alloc_node(p, AST_PROTOCOL_REQ);
+  if (!req) return NULL;
+  req->tok_idx = (uint32_t)p->pos; /* 'subscript' token — used as req_name */
+  req->modifiers = mods;
+  adv(p); /* 'subscript' */
+
+  if (!p_is_eof(p) && cur_char(p) == '<')
+    parse_generic_params(p, req);
+  parse_params(p, req);
+
+  if (p_is_op(p, OP_ARROW)) {
+    adv(p);
+    ASTNode *ret = parse_type(p);
+    if (ret) ast_add_child(req, ret);
+  }
+  /* Accessor block: { get [set] } — same shape as var requirement. */
+  if (P_LBRACE(p)) {
+    adv(p);
+    while (!p_is_eof(p) && !P_RBRACE(p)) {
+      if (p_tok(p)->type == TOK_IDENTIFIER && tok_eq(p, p_tok(p), CK_SET))
+        { req->modifiers |= MOD_PROTOCOL_PROP_SET; adv(p); break; }
+      adv(p);
+    }
+    if (P_RBRACE(p)) adv(p);
+  }
+  return req;
+}
+
 /** @brief Parses an init requirement in a protocol body. */
 static ASTNode *parse_proto_init_req(Parser *p, uint32_t mods) {
   ASTNode *req = alloc_node(p, AST_PROTOCOL_REQ);
@@ -616,6 +646,8 @@ void parse_protocol_body(Parser *p, ASTNode *proto) {
       req = parse_proto_assoc_req(p, mods);
     else if (p_is_kw(p, KW_INIT))
       req = parse_proto_init_req(p, mods);
+    else if (p_is_kw(p, KW_SUBSCRIPT))
+      req = parse_proto_subscript_req(p, mods);
     else
       adv(p);
 

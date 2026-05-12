@@ -823,6 +823,25 @@ int check_conformance(const ASTNode *type_decl, const ASTNode *proto_decl,
     if (!strcmp(req_name, "associatedtype") || !strcmp(req_name, "typealias") ||
         !strcmp(req_name, "protocol"))
       continue;
+    /* Bug #16: subscript reqs parse but full conformance check requires
+     * locating an AST_SUBSCRIPT_DECL with a structurally-matching signature.
+     * That check is a follow-up; for now, find a subscript impl and accept
+     * its presence (no signature validation). */
+    if (!strcmp(req_name, "subscript")) {
+      int sub_found = 0;
+      for (const ASTNode *impl = type_body->first_child; impl;
+           impl = impl->next_sibling) {
+        if (impl->kind == AST_SUBSCRIPT_DECL) { sub_found = 1; break; }
+      }
+      if (!sub_found) {
+        sema_error(ctx, type_decl,
+                   "'%s' does not implement 'subscript' requirement of "
+                   "protocol '%s'",
+                   type_name, proto_name);
+        all_ok = 0;
+      }
+      continue;
+    }
 
     int found = 0, is_init = !strcmp(req_name, "init");
     int req_is_assoc = protocol_req_is_associated_type(req);
