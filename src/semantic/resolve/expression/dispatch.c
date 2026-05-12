@@ -28,23 +28,31 @@ TypeInfo *resolve_node_expr(SemaContext *ctx, ASTNode *node) {
     return NULL;
   case AST_ARRAY_LITERAL: {
     TypeInfo *elem_t = NULL;
+    int mixed = 0;
     for (ASTNode *c = node->first_child; c; c = c->next_sibling) {
       TypeInfo *et = resolve_node(ctx, c);
       if (!elem_t) {
         elem_t = et;
       } else if (et && !type_equal(elem_t, et)) {
-        char exp_s[64], got_s[64];
-        type_to_string(elem_t, exp_s, sizeof(exp_s));
-        type_to_string(et, got_s, sizeof(got_s));
-        sema_error(ctx, c,
-                   "Array elements must be the same type: expected '%s', found "
-                   "'%s'",
-                   exp_s, got_s);
+        /* Bug #6 (Piece C): heterogeneous element types fall back to [Any]
+         * so contextual `let xs: [Any] = [1, "x"]` works. miniswift IR-gen
+         * boxes each element via __any_box_* based on per-element type. */
+        mixed = 1;
       }
     }
     TypeInfo *ti = type_arena_alloc(ctx->type_arena);
     ti->kind = TY_ARRAY;
-    ti->inner = elem_t;
+    if (mixed) {
+      TypeInfo *any_t = type_arena_alloc(ctx->type_arena);
+      if (any_t) {
+        any_t->kind = TY_NAMED;
+        any_t->named.name = sema_intern(ctx, SW_TYPE_ANY,
+                                        sizeof(SW_TYPE_ANY) - 1);
+      }
+      ti->inner = any_t;
+    } else {
+      ti->inner = elem_t;
+    }
     return (node->type = ti);
   }
   case AST_DICT_LITERAL: {

@@ -125,6 +125,18 @@ TypeInfo *resolve_var_decl(SemaContext *ctx, ASTNode *node) {
     init_t = annot_t;
   }
 
+  /* Bug #6 (Piece C): contextual `[Any]` annotation on a non-empty array
+   * literal — propagate the annotation type so the IR emitter sees [Any]
+   * and boxes each element via __any_box_*. Per-element types are
+   * preserved so collections.c picks the right box helper. */
+  if (annot_t && init && init->first_child &&
+      init->kind == AST_ARRAY_LITERAL &&
+      annot_t->kind == TY_ARRAY && annot_t->inner &&
+      (type_is_any(annot_t->inner) || type_is_anyobject(annot_t->inner))) {
+    ((ASTNode *)init)->type = annot_t;
+    init_t = annot_t;
+  }
+
   TypeInfo *final_t = annot_t ? annot_t : wrapper_t ? wrapper_t : init_t;
   node->type = final_t;
 
