@@ -42,7 +42,7 @@ int scan_regex_literal(Lexer *l, const uint8_t *s, uint32_t len,
     if (s[p] == '/') {
       uint32_t tl = p - sp + 1;
       l->pos = p + 1; l->col += tl;
-      *out = (Token){TOK_REGEX_LIT, sp, tl, sl, sc, KW_NONE, OP_NONE};
+      *out = (Token){TOK_REGEX_LIT, sp, tl, sl, sc, KW_NONE, OP_NONE, 0};
       return 1;
     }
     if (IS_NEWLINE(s[p])) return 0;
@@ -83,16 +83,24 @@ Token scan_symbol(Lexer *l, const uint8_t *s, uint32_t len, uint8_t c,
     uint8_t ml = MULTI_OPS[i].len;
     if (l->pos + ml <= len && memcmp(s + l->pos, MULTI_OPS[i].op, ml) == 0) {
       ADVANCE_BY(l, ml);
-      return (Token){TOK_OPERATOR, sp, ml, sl, sc, KW_NONE, MULTI_OPS[i].kind};
+      return (Token){TOK_OPERATOR, sp, ml, sl, sc, KW_NONE, MULTI_OPS[i].kind, 0};
     }
   }
 
-  if (c == '/' && nx != ' ' && nx != '\t' && !IS_NEWLINE(nx) &&
-      nx != ')' && nx != ']' && nx != '}' && nx != ',' && nx != ';' &&
-      nx != ':' && nx != 0) {
-    Token reg;
-    if (scan_regex_literal(l, s, len, sp, sl, sc, &reg)) return reg;
-  }
+  /* NOTE: Regex literals are deliberately NOT scanned here.
+   *
+   * A context-free lexer cannot reliably distinguish `a / b / c` (division)
+   * from `a /b/ c` (regex) — the decision requires expression-position
+   * context that only the parser has.  The old heuristic
+   * ("`/` not followed by whitespace/delimiter → try regex") mis-tokenizes
+   * legitimate division like `total/count/2` as a regex literal.
+   *
+   * Until a parser-driven contextual regex scanner lands (parse_prefix can
+   * peek at a `/` token and re-scan the source between it and the matching
+   * close `/`), `/` is always emitted as TOK_OPERATOR.  TOK_REGEX_LIT
+   * remains in the public token enum for forward compatibility and is
+   * still consumed by parse_prefix on the off chance a future caller
+   * synthesises one. */
 
   uint8_t raw_tt = LEX_CHAR_TOKEN[c];
   TokenType tt = (raw_tt == TT_OPERATOR) ? TOK_OPERATOR
@@ -118,7 +126,7 @@ Token scan_symbol(Lexer *l, const uint8_t *s, uint32_t len, uint8_t c,
     while (end < len) {
       uint8_t nc = s[end];
       if (LEX_CHAR_TOKEN[nc] != TT_OPERATOR) break;
-      /* don't merge into a comment opener — `//` and `/*` are higher prio */
+      /* don't merge into a comment opener (// or block-comment) — higher prio */
       if (nc == '/' && end + 1 < len && (s[end + 1] == '/' || s[end + 1] == '*'))
         break;
       end++;
@@ -126,10 +134,10 @@ Token scan_symbol(Lexer *l, const uint8_t *s, uint32_t len, uint8_t c,
     uint32_t tl = end - l->pos;
     if (tl > 1) {
       ADVANCE_BY(l, tl);
-      return (Token){TOK_OPERATOR, sp, tl, sl, sc, KW_NONE, OP_NONE};
+      return (Token){TOK_OPERATOR, sp, tl, sl, sc, KW_NONE, OP_NONE, 0};
     }
   }
 
   ADVANCE(l);
-  return (Token){tt, sp, 1, sl, sc, KW_NONE, OP_NONE};
+  return (Token){tt, sp, 1, sl, sc, KW_NONE, OP_NONE, 0};
 }

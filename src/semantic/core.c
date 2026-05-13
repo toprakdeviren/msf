@@ -67,13 +67,119 @@ int sema_has_precedence_group(const SemaContext *ctx, const char *name) {
  * freed by the caller (interned strings outlive sema analysis).
  * ═══════════════════════════════════════════════════════════════════════════════ */
 
+/* ── Chunked string buffer ──────────────────────────────────────────────────
+ *
+ * Each chunk is a stable block of bytes — once a string is written into a
+ * chunk, its pointer never moves.  When the active chunk fills up, a fresh
+ * chunk is allocated and linked in.  This keeps every interned `const char*`
+ * we hand out valid for the lifetime of the pool, even as the pool grows.
+ *
+ * The hash table itself (table + lengths) is allowed to be reallocated on
+ * growth — only the *contents* of the table change, not the strings.
+ */
+#define INTERN_CHUNK_MIN  (32u * 1024u)   /* 32 KB minimum chunk allocation */
+
+typedef struct InternChunk {
+  struct InternChunk *next;
+  size_t              used;
+  size_t              cap;
+  /* `data` is allocated as a flexible-array region following the struct;
+   * we use a separate malloc rather than a flexible array member to keep
+   * MSVC happy and avoid alignment quirks. */
+  char               *data;
+} InternChunk;
+
 struct InternPool {
-  char        buf[INTERN_BUF_SIZE];       /**< Contiguous string storage. */
-  size_t      used;                       /**< Bytes consumed in buf. */
-  const char *table[INTERN_POOL_CAP];     /**< Open-addressing hash table. */
-  uint32_t    lengths[INTERN_POOL_CAP];   /**< Cached lengths for fast reject. */
-  size_t      count;                      /**< Entries in the table. */
+  InternChunk  *head;        /**< First chunk (oldest). */
+  InternChunk  *tail;        /**< Active chunk for new strings. */
+  const char  **table;       /**< Open-addressing hash table.   */
+  uint32_t     *lengths;     /**< Per-slot string length.        */
+  size_t        table_cap;   /**< Power of two; INTERN_POOL_CAP initially. */
+  size_t        count;       /**< Live entries in the table.    */
+  uint8_t       oom;         /**< Set on first allocation failure. */
 };
+
+/** @brief Releases all chunks and table arrays owned by the pool.
+ *  The InternPool struct itself is freed by the caller. */
+static void intern_pool_release(InternPool *pool) {
+  if (!pool) return;
+  InternChunk *c = pool->head;
+  while (c) {
+    InternChunk *next = c->next;
+    free(c->data);
+    free(c);
+    c = next;
+  }
+  pool->head = pool->tail = NULL;
+  free(pool->table);   pool->table = NULL;
+  free(pool->lengths); pool->lengths = NULL;
+  pool->table_cap = 0;
+  pool->count = 0;
+}
+
+/** @brief Allocates the initial hash table.  Returns 0 on success, -1 OOM. */
+static int intern_pool_init_table(InternPool *pool) {
+  pool->table_cap = INTERN_POOL_CAP;
+  pool->table   = calloc(pool->table_cap, sizeof(*pool->table));
+  pool->lengths = calloc(pool->table_cap, sizeof(*pool->lengths));
+  if (!pool->table || !pool->lengths) {
+    free(pool->table);   pool->table = NULL;
+    free(pool->lengths); pool->lengths = NULL;
+    pool->table_cap = 0;
+    return -1;
+  }
+  return 0;
+}
+
+/** @brief Doubles the hash table and rehashes existing entries.
+ *  Returns 0 on success, -1 on OOM (the old table stays intact). */
+static int intern_pool_grow_table(InternPool *pool) {
+  size_t new_cap = pool->table_cap * 2;
+  if (new_cap < pool->table_cap) return -1;  /* overflow */
+  const char **new_tab = calloc(new_cap, sizeof(*new_tab));
+  uint32_t    *new_len = calloc(new_cap, sizeof(*new_len));
+  if (!new_tab || !new_len) {
+    free(new_tab); free(new_len);
+    return -1;
+  }
+  size_t new_mask = new_cap - 1;
+  for (size_t i = 0; i < pool->table_cap; i++) {
+    const char *s = pool->table[i];
+    if (!s) continue;
+    uint32_t h = 2166136261u;
+    for (uint32_t j = 0; j < pool->lengths[i]; j++)
+      h = (h ^ (uint8_t)s[j]) * 16777619u;
+    size_t slot = h & new_mask;
+    while (new_tab[slot]) slot = (slot + 1) & new_mask;
+    new_tab[slot] = s;
+    new_len[slot] = pool->lengths[i];
+  }
+  free(pool->table);   pool->table   = new_tab;
+  free(pool->lengths); pool->lengths = new_len;
+  pool->table_cap = new_cap;
+  return 0;
+}
+
+/** @brief Reserves @p need bytes in the active chunk, allocating a new one
+ *  if necessary.  Returns a pointer into the chunk on success, NULL on OOM. */
+static char *intern_pool_reserve(InternPool *pool, size_t need) {
+  if (!pool->tail || pool->tail->used + need > pool->tail->cap) {
+    size_t cap = need > INTERN_CHUNK_MIN ? need : INTERN_CHUNK_MIN;
+    InternChunk *c = malloc(sizeof(InternChunk));
+    if (!c) return NULL;
+    c->data = malloc(cap);
+    if (!c->data) { free(c); return NULL; }
+    c->used = 0;
+    c->cap  = cap;
+    c->next = NULL;
+    if (pool->tail) pool->tail->next = c;
+    else            pool->head = c;
+    pool->tail = c;
+  }
+  char *p = pool->tail->data + pool->tail->used;
+  pool->tail->used += need;
+  return p;
+}
 
 /** @brief FNV-1a hash for intern pool lookup. */
 static uint32_t intern_hash(const char *s, size_t len) {
@@ -87,21 +193,27 @@ static uint32_t intern_hash(const char *s, size_t len) {
  * @brief Interns a string, returning a pointer to the canonical copy.
  *
  * If the string is already interned, returns the existing pointer (O(1)).
- * Otherwise copies it into the buffer and inserts into the hash table.
+ * Otherwise copies it into a chunked buffer and inserts into the hash table.
  * NFC-normalizes non-ASCII input before interning.
  *
- * Returns "<intern_overflow>" sentinel on buffer/table exhaustion.
+ * Both the chunk buffer and the hash table grow on demand — there is no
+ * fixed capacity to overflow.  On allocation failure, returns NULL and
+ * marks the pool as OOM so callers can surface a real diagnostic instead
+ * of silently aliasing distinct identifiers.
  *
  * @param ctx  Sema context (owns the intern pool).
  * @param str  String bytes to intern.
  * @param len  String length.
- * @return     Interned pointer (valid until the pool is freed).
+ * @return     Interned pointer (valid until the pool is freed) or NULL on OOM.
  */
 const char *sema_intern(SemaContext *ctx, const char *str, size_t len) {
   if (!ctx->intern) {
     ctx->intern = calloc(1, sizeof(InternPool));
-    if (!ctx->intern)
-      return "<intern_overflow>";
+    if (!ctx->intern) return NULL;
+    if (intern_pool_init_table(ctx->intern) != 0) {
+      ctx->intern->oom = 1;
+      return NULL;
+    }
   }
 
   /* NFC normalization — zero overhead for ASCII (quick-check fast path). */
@@ -120,41 +232,50 @@ const char *sema_intern(SemaContext *ctx, const char *str, size_t len) {
   }
 
   InternPool *pool = ctx->intern;
-  uint32_t h = intern_hash(src, src_len);
-  uint32_t mask = INTERN_POOL_CAP - 1;
-  uint32_t slot = h & mask;
 
   /* Probe for existing entry. */
-  for (uint32_t probe = 0; probe < INTERN_POOL_CAP; probe++) {
-    uint32_t idx = (slot + probe) & mask;
-    if (!pool->table[idx])
-      break;
+  uint32_t h = intern_hash(src, src_len);
+  size_t mask = pool->table_cap - 1;
+  size_t slot = h & mask;
+  for (size_t probe = 0; probe < pool->table_cap; probe++) {
+    size_t idx = (slot + probe) & mask;
+    if (!pool->table[idx]) { slot = idx; break; }
     if (pool->lengths[idx] == (uint32_t)src_len &&
         memcmp(pool->table[idx], src, src_len) == 0)
       return pool->table[idx];
   }
 
-  /* Not found — insert. */
-  if (pool->used + src_len + 1 > INTERN_BUF_SIZE)
-    return "<intern_overflow>";
-  if (pool->count >= (INTERN_POOL_CAP * 3 / 4))
-    return "<intern_overflow>";
+  /* Grow table if load factor would exceed 3/4 after this insert.
+   * Reslot afterwards since rehash changes positions. */
+  if ((pool->count + 1) * 4 >= pool->table_cap * 3) {
+    if (intern_pool_grow_table(pool) != 0) {
+      pool->oom = 1;
+      return NULL;
+    }
+    mask = pool->table_cap - 1;
+    slot = h & mask;
+    while (pool->table[slot]) slot = (slot + 1) & mask;
+  }
 
-  char *p = pool->buf + pool->used;
+  /* Allocate space for the string (plus NUL). */
+  char *p = intern_pool_reserve(pool, src_len + 1);
+  if (!p) {
+    pool->oom = 1;
+    return NULL;
+  }
   memcpy(p, src, src_len);
   p[src_len] = '\0';
-  pool->used += src_len + 1;
 
-  for (uint32_t probe = 0; probe < INTERN_POOL_CAP; probe++) {
-    uint32_t idx = (slot + probe) & mask;
-    if (!pool->table[idx]) {
-      pool->table[idx] = p;
-      pool->lengths[idx] = (uint32_t)src_len;
-      pool->count++;
-      return p;
-    }
-  }
-  return "<intern_overflow>";
+  pool->table[slot] = p;
+  pool->lengths[slot] = (uint32_t)src_len;
+  pool->count++;
+  return p;
+}
+
+/** @brief Returns non-zero if the interner has reported an OOM since init.
+ *  Callers can surface this as a diagnostic. */
+int sema_intern_oom(const SemaContext *ctx) {
+  return ctx && ctx->intern && ctx->intern->oom;
 }
 
 /** @brief Interns the text of token at @p tok_idx. */
@@ -239,12 +360,19 @@ static int is_result_builder_method(SemaContext *ctx, const ASTNode *decl) {
   const ASTNode *type_decl = parent_block->parent;
   if (type_decl->kind != AST_STRUCT_DECL && type_decl->kind != AST_CLASS_DECL)
     return 0;
-  if (!type_decl->parent)
-    return 0;
+  /* Children-attached attribute (new representation). */
+  for (const ASTNode *c = type_decl->first_child; c; c = c->next_sibling) {
+    if (c->kind != AST_ATTRIBUTE) continue;
+    const Token *at = &ctx->tokens[c->data.var.name_tok];
+    const char *aname = sema_intern(ctx, ctx->src->data + at->pos, at->len);
+    if (!strcmp(aname, SW_ATTR_RESULT_BUILDER))
+      return 1;
+  }
+  /* Sibling fallback. */
+  if (!type_decl->parent) return 0;
   for (const ASTNode *sib = type_decl->parent->first_child; sib;
        sib = sib->next_sibling) {
-    if (sib->next_sibling != type_decl)
-      continue;
+    if (sib->next_sibling != type_decl) continue;
     if (sib->kind == AST_ATTRIBUTE) {
       const Token *at = &ctx->tokens[sib->data.var.name_tok];
       const char *aname = sema_intern(ctx, ctx->src->data + at->pos, at->len);
@@ -707,9 +835,18 @@ SemaContext *sema_init(const Source *src, const Token *tokens,
 void sema_destroy(SemaContext *ctx) {
   if (!ctx) return;
   sema_free(ctx);
-  free(ctx->intern);
-  free(ctx->conformance_table);
-  free(ctx->assoc_type_table);
+  if (ctx->intern) {
+    intern_pool_release(ctx->intern);
+    free(ctx->intern);
+  }
+  if (ctx->conformance_table) {
+    free(ctx->conformance_table->entries);
+    free(ctx->conformance_table);
+  }
+  if (ctx->assoc_type_table) {
+    free(ctx->assoc_type_table->entries);
+    free(ctx->assoc_type_table);
+  }
   free(ctx);
 }
 

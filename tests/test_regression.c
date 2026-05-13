@@ -486,6 +486,75 @@ static void test_reg_token_stream_push_no_exit(void) {
   TEST_PASS();
 }
 
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  Lexer diagnostics must reach MSFResult.  msf_analyze used to call
+ *  lexer_tokenize with diag=NULL, dropping unterminated-string / invalid-
+ *  escape errors before they could surface through msf_error_*().
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void test_reg_lexer_diag_reaches_result(void) {
+  TEST("REG: unterminated string surfaces as msf_error_*");
+  MSFResult *r = msf_analyze("let x = \"unterminated", "t.swift");
+  ASSERT(r != NULL);
+  int seen_unterm = 0;
+  for (uint32_t i = 0; i < msf_error_count(r); i++) {
+    const char *m = msf_error_message(r, i);
+    if (strstr(m, "unterm") || strstr(m, "Unterm")) { seen_unterm = 1; break; }
+  }
+  ASSERT(seen_unterm);
+  msf_result_free(r);
+  TEST_PASS();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  Parser must not stack-overflow on pathologically deep nesting.  Used to
+ *  blow the C stack on inputs like `((((((((x))))))))` taken far enough.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  Context-free regex scanning used to mis-tokenize `a/b/c` as a regex
+ *  literal (`a` + regex `/b/` + `c`).  Lexer now always emits `/` as
+ *  TOK_OPERATOR; regex literals require parser-driven scanning.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void test_reg_division_not_regex(void) {
+  TEST("REG: `a/b/c` lexes as three division tokens, not a regex literal");
+  Source src; TokenStream ts;
+  test_tokenize("let r = a/b/c", &src, &ts);
+  int seen_regex = 0, seen_div = 0;
+  for (size_t i = 0; i < ts.count; i++) {
+    if (ts.tokens[i].type == TOK_REGEX_LIT) seen_regex = 1;
+    if (ts.tokens[i].type == TOK_OPERATOR && ts.tokens[i].len == 1 &&
+        src.data[ts.tokens[i].pos] == '/') seen_div++;
+  }
+  ASSERT(!seen_regex);
+  ASSERT_EQ(seen_div, 2);
+  token_stream_free(&ts);
+  TEST_PASS();
+}
+
+static void test_reg_deep_parens_dont_crash(void) {
+  TEST("REG: 10000-deep parens does not crash");
+  const int n = 10000;
+  char *src = malloc((size_t)(2 * n + 4));
+  ASSERT(src != NULL);
+  for (int i = 0; i < n; i++) src[i] = '(';
+  src[n] = 'x';
+  for (int i = 0; i < n; i++) src[n + 1 + i] = ')';
+  src[2 * n + 1] = '\0';
+  MSFResult *r = msf_analyze(src, "deep.swift");
+  ASSERT(r != NULL);
+  /* Must have surfaced some "too deeply nested" diagnostic. */
+  int saw_guard = 0;
+  for (uint32_t i = 0; i < msf_error_count(r); i++) {
+    if (strstr(msf_error_message(r, i), "deeply nested")) { saw_guard = 1; break; }
+  }
+  ASSERT(saw_guard);
+  msf_result_free(r);
+  free(src);
+  TEST_PASS();
+}
+
 /* ── Runner ───────────────────────────────────────────────────────────────── */
 
 void run_regression_tests(void) {
@@ -515,4 +584,10 @@ void run_regression_tests(void) {
   /* OOM handling fixes */
   test_reg_arena_alloc_null_on_failed_init();
   test_reg_token_stream_push_no_exit();
+  /* Diagnostics plumbing */
+  test_reg_lexer_diag_reaches_result();
+  /* Parser robustness */
+  test_reg_deep_parens_dont_crash();
+  /* Lexer correctness */
+  test_reg_division_not_regex();
 }

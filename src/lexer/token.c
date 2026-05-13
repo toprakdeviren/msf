@@ -8,6 +8,7 @@
  */
 #include "internal/lexer.h"
 #include "internal/limits.h"
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -84,7 +85,11 @@ const char *token_text(const Source *src, const Token *tok) {
  * @param cap  Initial capacity (number of tokens to pre-allocate).
  */
 void token_stream_init(TokenStream *ts, size_t cap) {
-  ts->tokens = cap ? malloc(cap * sizeof(Token)) : NULL;
+  if (cap && cap <= SIZE_MAX / sizeof(Token)) {
+    ts->tokens = malloc(cap * sizeof(Token));
+  } else {
+    ts->tokens = NULL;
+  }
   ts->count = 0;
   ts->capacity = ts->tokens ? cap : 0;
 }
@@ -107,20 +112,27 @@ void token_stream_free(TokenStream *ts) {
  * @brief Appends a token to the stream, growing the buffer if needed.
  *
  * Growth strategy: starts at 64 tokens, then grows by 50% each time
- * (amortized O(1) push).  On allocation failure, the token is silently
- * dropped — the stream remains valid with its existing contents.
+ * (amortized O(1) push).  Returns 0 on success, -1 on allocation
+ * failure — the stream remains valid with its existing contents but
+ * the caller MUST stop pushing further tokens; the parser relies on
+ * an EOF terminator being reachable.
  *
  * @param ts   Token stream to append to.
  * @param tok  Token to append.
+ * @return     0 on success, -1 on out-of-memory.
  */
-void token_stream_push(TokenStream *ts, Token tok) {
+int token_stream_push(TokenStream *ts, Token tok) {
   if (ts->count >= ts->capacity) {
     size_t new_cap = ts->capacity < 16 ? 64 : ts->capacity + (ts->capacity >> 1);
+    /* Overflow guard for new_cap * sizeof(Token). */
+    if (new_cap > SIZE_MAX / sizeof(Token))
+      return -1;
     Token *new_ptr = realloc(ts->tokens, new_cap * sizeof(Token));
     if (!new_ptr)
-      return;
+      return -1;
     ts->capacity = new_cap;
     ts->tokens = new_ptr;
   }
   ts->tokens[ts->count++] = tok;
+  return 0;
 }

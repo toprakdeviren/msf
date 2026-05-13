@@ -18,28 +18,40 @@
 #include <string.h>
 
 /* ═══════════════════════════════════════════════════════════════════════════════
- * Global Built-in Type Singletons
+ * Built-in Type Singletons
  *
- * Each pointer is set once by type_builtins_init() and lives until
- * type_arena_free().  Sema code compares against these via pointer
- * equality — no strcmp needed for built-in type checks.
+ * Each TY_BUILTIN_* points to an immortal TypeInfo with static storage
+ * duration — no arena dependency, no per-MSFResult initialization, safe
+ * across concurrent analyses and across MSFResult lifetimes.
+ *
+ * Sema code compares against these via pointer equality — no strcmp needed
+ * for built-in type checks.  Treat the underlying objects as read-only;
+ * mutating a builtin would corrupt every other analysis.
+ *
+ * type_builtins_init() is kept as a no-op for backward compatibility.
  * ═══════════════════════════════════════════════════════════════════════════════ */
 
-TypeInfo *TY_BUILTIN_VOID = NULL;
-TypeInfo *TY_BUILTIN_BOOL = NULL;
-TypeInfo *TY_BUILTIN_INT = NULL;
-TypeInfo *TY_BUILTIN_STRING = NULL;
-TypeInfo *TY_BUILTIN_DOUBLE = NULL;
-TypeInfo *TY_BUILTIN_FLOAT = NULL;
-TypeInfo *TY_BUILTIN_JSONENCODER = NULL;
-TypeInfo *TY_BUILTIN_JSONDECODER = NULL;
-TypeInfo *TY_BUILTIN_DATA = NULL;
-TypeInfo *TY_BUILTIN_SUBSTRING = NULL;
-TypeInfo *TY_BUILTIN_UINT64 = NULL;
-TypeInfo *TY_BUILTIN_UINT = NULL;
-TypeInfo *TY_BUILTIN_UINT32 = NULL;
-TypeInfo *TY_BUILTIN_UINT16 = NULL;
-TypeInfo *TY_BUILTIN_UINT8 = NULL;
+#define MSF_BUILTIN_DEF(NAME, KIND) \
+  static TypeInfo _msf_builtin_##NAME = { .kind = (KIND) }; \
+  TypeInfo *TY_BUILTIN_##NAME = &_msf_builtin_##NAME
+
+MSF_BUILTIN_DEF(VOID,        TY_VOID);
+MSF_BUILTIN_DEF(BOOL,        TY_BOOL);
+MSF_BUILTIN_DEF(INT,         TY_INT);
+MSF_BUILTIN_DEF(STRING,      TY_STRING);
+MSF_BUILTIN_DEF(DOUBLE,      TY_DOUBLE);
+MSF_BUILTIN_DEF(FLOAT,       TY_FLOAT);
+MSF_BUILTIN_DEF(JSONENCODER, TY_JSONENCODER);
+MSF_BUILTIN_DEF(JSONDECODER, TY_JSONDECODER);
+MSF_BUILTIN_DEF(DATA,        TY_DATA);
+MSF_BUILTIN_DEF(SUBSTRING,   TY_SUBSTRING);
+MSF_BUILTIN_DEF(UINT64,      TY_UINT64);
+MSF_BUILTIN_DEF(UINT,        TY_UINT);
+MSF_BUILTIN_DEF(UINT32,      TY_UINT32);
+MSF_BUILTIN_DEF(UINT16,      TY_UINT16);
+MSF_BUILTIN_DEF(UINT8,       TY_UINT8);
+
+#undef MSF_BUILTIN_DEF
 
 /* ═══════════════════════════════════════════════════════════════════════════════
  * Type Arena
@@ -129,34 +141,12 @@ TypeInfo *type_arena_alloc(TypeArena *a) {
 }
 
 /**
- * @brief Initializes all built-in type singletons from the given arena.
+ * @brief No-op.  Built-in type singletons are now immortal static objects
+ *        and no longer require per-arena initialization.  Retained as an
+ *        export so existing callers keep linking.
  *
- * Allocates one TypeInfo per built-in type and assigns it to the
- * corresponding TY_BUILTIN_* global pointer.  Most types come from
- * the generated type_builtins.h; unsigned integers are added manually.
- *
- * Must be called once before any sema pass.  The singletons remain
- * valid until type_arena_free(a) is called.
- *
- * @param a  Arena to allocate singletons from.
+ * @param a  Arena (ignored).
  */
 void type_builtins_init(TypeArena *a) {
-  TypeInfo *t;
-  /* @generated (scripts/codegen.py) */
-  t = type_arena_alloc(a); t->kind = TY_VOID;        TY_BUILTIN_VOID        = t;
-  t = type_arena_alloc(a); t->kind = TY_BOOL;        TY_BUILTIN_BOOL        = t;
-  t = type_arena_alloc(a); t->kind = TY_INT;         TY_BUILTIN_INT         = t;
-  t = type_arena_alloc(a); t->kind = TY_FLOAT;       TY_BUILTIN_FLOAT       = t;
-  t = type_arena_alloc(a); t->kind = TY_DOUBLE;      TY_BUILTIN_DOUBLE      = t;
-  t = type_arena_alloc(a); t->kind = TY_STRING;      TY_BUILTIN_STRING      = t;
-  t = type_arena_alloc(a); t->kind = TY_JSONENCODER; TY_BUILTIN_JSONENCODER = t;
-  t = type_arena_alloc(a); t->kind = TY_JSONDECODER; TY_BUILTIN_JSONDECODER = t;
-  t = type_arena_alloc(a); t->kind = TY_DATA;        TY_BUILTIN_DATA        = t;
-  t = type_arena_alloc(a); t->kind = TY_SUBSTRING;   TY_BUILTIN_SUBSTRING   = t;
-  /* Unsigned integer singletons (not in types.yaml yet) */
-  t = type_arena_alloc(a); t->kind = TY_UINT64; TY_BUILTIN_UINT64 = t;
-  t = type_arena_alloc(a); t->kind = TY_UINT;   TY_BUILTIN_UINT   = t;
-  t = type_arena_alloc(a); t->kind = TY_UINT32; TY_BUILTIN_UINT32 = t;
-  t = type_arena_alloc(a); t->kind = TY_UINT16; TY_BUILTIN_UINT16 = t;
-  t = type_arena_alloc(a); t->kind = TY_UINT8;  TY_BUILTIN_UINT8  = t;
+  (void)a;
 }

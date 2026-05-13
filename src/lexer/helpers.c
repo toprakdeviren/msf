@@ -57,7 +57,7 @@ const MultiCharOp MULTI_OPS[] = {
  * @return    A fully initialized Token.
  */
 Token make_string_tok(uint32_t sp, uint32_t tl, uint32_t sl, uint32_t sc) {
-  return (Token){TOK_STRING_LIT, sp, tl, sl, sc, KW_NONE, OP_NONE};
+  return (Token){TOK_STRING_LIT, sp, tl, sl, sc, KW_NONE, OP_NONE, 0};
 }
 
 /**

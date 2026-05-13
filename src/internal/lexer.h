@@ -99,8 +99,9 @@ void token_stream_init(TokenStream *ts, size_t initial_capacity);
 /** @brief Frees all memory owned by a token stream. */
 void token_stream_free(TokenStream *ts);
 
-/** @brief Appends a token (grows buffer if needed, silently drops on OOM). */
-void token_stream_push(TokenStream *ts, Token tok);
+/** @brief Appends a token (grows buffer if needed).
+ *  @return 0 on success, -1 on out-of-memory (stream still valid). */
+int token_stream_push(TokenStream *ts, Token tok);
 
 /* ┌──────────────────────────────────────────────────────────────────────────┐
  * │  4. BATCH TOKENIZATION                                                 │

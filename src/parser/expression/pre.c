@@ -60,9 +60,19 @@ static int first_group_ref_lbp(const Parser *p, const ASTNode *parent) {
  * lowerThan are present, higherThan wins. Associativity then decides how
  * rbp relates to lbp (left: lbp-1, right: lbp+1, none: lbp).
  */
+/** @brief Grows the parser precedence-group table geometrically.
+ *  Returns 0 on success, -1 on OOM. */
+static int grow_pg_table(Parser *p) {
+  int new_cap = p->pg_capacity ? p->pg_capacity * 2 : 16;
+  ParserPrecGroup *t = realloc(p->pg_table, (size_t)new_cap * sizeof(*t));
+  if (!t) return -1;
+  p->pg_table = t;
+  p->pg_capacity = new_cap;
+  return 0;
+}
+
 void register_precedence_group_from_ast(Parser *p, ASTNode *node) {
-  if (p->pg_count >= MAX_PRECEDENCE_GROUPS)
-    return;
+  if (p->pg_count >= p->pg_capacity && grow_pg_table(p) != 0) return;
   if (!node->data.var.name_tok)
     return;
   const Token *t = &p->ts->tokens[node->data.var.name_tok];
@@ -114,8 +124,18 @@ void register_precedence_group_from_ast(Parser *p, ASTNode *node) {
  * Links the operator symbol to its precedence group name so that
  * get_custom_infix_prec() can look up binding powers at parse time.
  */
+/** @brief Grows the custom-operator table geometrically.  Returns 0 OK, -1 OOM. */
+static int grow_custom_ops(Parser *p) {
+  int new_cap = p->custom_op_capacity ? p->custom_op_capacity * 2 : 16;
+  ParserCustomOp *t = realloc(p->custom_ops, (size_t)new_cap * sizeof(*t));
+  if (!t) return -1;
+  p->custom_ops = t;
+  p->custom_op_capacity = new_cap;
+  return 0;
+}
+
 void register_operator_from_ast(Parser *p, ASTNode *node) {
-  if (p->custom_op_count >= MAX_CUSTOM_OPERATORS)
+  if (p->custom_op_count >= p->custom_op_capacity && grow_custom_ops(p) != 0)
     return;
   if (!node->data.var.name_tok)
     return;

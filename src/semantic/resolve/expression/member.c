@@ -40,17 +40,31 @@ static void check_actor_isolation_for_member(SemaContext *ctx,
    * that pass 1 forward-declared. The consequence: apply_preceding_main_actor
    * never fires for those decls. Apply the lazy version here so we can read
    * MOD_MAIN_ACTOR off the AST node. */
-  if (!(target_decl->modifiers & MOD_MAIN_ACTOR) && target_decl->parent) {
-    for (const ASTNode *sib = target_decl->parent->first_child; sib;
-         sib = sib->next_sibling) {
-      if (sib->next_sibling != target_decl) continue;
-      if (sib->kind != AST_ATTRIBUTE) break;
-      const Token *at = &ctx->tokens[sib->data.var.name_tok];
+  if (!(target_decl->modifiers & MOD_MAIN_ACTOR)) {
+    /* Children-attached attribute (new structural form). */
+    for (const ASTNode *c = target_decl->first_child; c; c = c->next_sibling) {
+      if (c->kind != AST_ATTRIBUTE) continue;
+      const Token *at = &ctx->tokens[c->data.var.name_tok];
       if (at->len == sizeof(SW_ATTR_MAIN_ACTOR) - 1 &&
           memcmp(ctx->src->data + at->pos, SW_ATTR_MAIN_ACTOR,
-                 sizeof(SW_ATTR_MAIN_ACTOR) - 1) == 0)
+                 sizeof(SW_ATTR_MAIN_ACTOR) - 1) == 0) {
         ((ASTNode *)target_decl)->modifiers |= MOD_MAIN_ACTOR;
-      break;
+        break;
+      }
+    }
+    /* Sibling fallback. */
+    if (!(target_decl->modifiers & MOD_MAIN_ACTOR) && target_decl->parent) {
+      for (const ASTNode *sib = target_decl->parent->first_child; sib;
+           sib = sib->next_sibling) {
+        if (sib->next_sibling != target_decl) continue;
+        if (sib->kind != AST_ATTRIBUTE) break;
+        const Token *at = &ctx->tokens[sib->data.var.name_tok];
+        if (at->len == sizeof(SW_ATTR_MAIN_ACTOR) - 1 &&
+            memcmp(ctx->src->data + at->pos, SW_ATTR_MAIN_ACTOR,
+                   sizeof(SW_ATTR_MAIN_ACTOR) - 1) == 0)
+          ((ASTNode *)target_decl)->modifiers |= MOD_MAIN_ACTOR;
+        break;
+      }
     }
   }
 

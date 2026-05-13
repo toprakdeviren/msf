@@ -73,7 +73,7 @@ static inline Keyword map_kw_id(uint32_t kid) {
 
 /** @brief Constructs a TOK_COMMENT token spanning [sp, l->pos). */
 #define MAKE_COMMENT_TOK(sp, l, sl, sc)  \
-  ((Token){TOK_COMMENT, (sp), (uint32_t)((l)->pos - (sp)), (sl), (sc), KW_NONE, OP_NONE})
+  ((Token){TOK_COMMENT, (sp), (uint32_t)((l)->pos - (sp)), (sl), (sc), KW_NONE, OP_NONE, 0})
 
 /**
  * @brief Constructs a TOK_STRING_LIT token with the given position info.

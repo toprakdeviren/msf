@@ -35,25 +35,32 @@ TypeInfo *resolve_var_decl(SemaContext *ctx, ASTNode *node) {
     return node->type ? node->type : TY_BUILTIN_INT;
   }
 
-  /* Detect @WrapperType attribute immediately preceding this var */
-  if (!node->data.var.has_wrapper && node->parent) {
-    for (const ASTNode *sib = node->parent->first_child; sib;
-         sib = sib->next_sibling) {
-      if (sib->next_sibling != node)
-        continue;
-      if (sib->kind != AST_ATTRIBUTE)
+  /* Detect @WrapperType attribute on this var.  Children-attached first
+   * (new structural form), then preceding-sibling fallback. */
+  if (!node->data.var.has_wrapper) {
+    const ASTNode *attr = NULL;
+    for (const ASTNode *c = node->first_child; c; c = c->next_sibling) {
+      if (c->kind == AST_ATTRIBUTE) { attr = c; break; }
+    }
+    if (!attr && node->parent) {
+      for (const ASTNode *sib = node->parent->first_child; sib;
+           sib = sib->next_sibling) {
+        if (sib->next_sibling != node) continue;
+        if (sib->kind == AST_ATTRIBUTE) attr = sib;
         break;
-      const Token *at = &ctx->tokens[sib->data.var.name_tok];
+      }
+    }
+    if (attr) {
+      const Token *at = &ctx->tokens[attr->data.var.name_tok];
       const char *attr_name =
           sema_intern(ctx, ctx->src->data + at->pos, at->len);
       for (uint32_t wi = 0; wi < ctx->wrapper_count; wi++) {
         if (ctx->wrapper_types[wi].name == attr_name) {
           ((ASTNode *)node)->data.var.has_wrapper = 1;
-          ((ASTNode *)node)->data.var.wrapper_type_tok = sib->data.var.name_tok;
+          ((ASTNode *)node)->data.var.wrapper_type_tok = attr->data.var.name_tok;
           break;
         }
       }
-      break;
     }
   }
 
@@ -675,16 +682,25 @@ int class_has_init_with_param_count(SemaContext *ctx, const ASTNode *class_decl,
   return 0;
 }
 
-/* Apply preceding @MainActor attribute to func/struct/class decl. */
+/* Apply attached @MainActor attribute to func/struct/class decl.  Checks
+ * children first (new structural attachment), then preceding sibling for
+ * backward compatibility. */
 void apply_preceding_main_actor(SemaContext *ctx, ASTNode *node) {
-  if (!node || !node->parent)
-    return;
+  if (!node) return;
+  for (const ASTNode *c = node->first_child; c; c = c->next_sibling) {
+    if (c->kind != AST_ATTRIBUTE) continue;
+    const Token *at = &ctx->tokens[c->data.var.name_tok];
+    const char *attr_name = sema_intern(ctx, ctx->src->data + at->pos, at->len);
+    if (attr_name && strcmp(attr_name, SW_ATTR_MAIN_ACTOR) == 0) {
+      node->modifiers |= MOD_MAIN_ACTOR;
+      return;
+    }
+  }
+  if (!node->parent) return;
   for (const ASTNode *sib = node->parent->first_child; sib;
        sib = sib->next_sibling) {
-    if (sib->next_sibling != node)
-      continue;
-    if (sib->kind != AST_ATTRIBUTE)
-      break;
+    if (sib->next_sibling != node) continue;
+    if (sib->kind != AST_ATTRIBUTE) break;
     const Token *at = &ctx->tokens[sib->data.var.name_tok];
     const char *attr_name = sema_intern(ctx, ctx->src->data + at->pos, at->len);
     if (attr_name && strcmp(attr_name, SW_ATTR_MAIN_ACTOR) == 0)

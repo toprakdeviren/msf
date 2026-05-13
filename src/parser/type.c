@@ -230,6 +230,8 @@ static ASTNode *wrap_optional(Parser *p, ASTNode *node) {
  * parse_type — main entry point
  * ═══════════════════════════════════════════════════════════════════════════════ */
 
+static ASTNode *parse_type_inner(Parser *p);
+
 /**
  * @brief Parses a Swift type expression.
  *
@@ -237,6 +239,19 @@ static ASTNode *wrap_optional(Parser *p, ASTNode *node) {
  * (T)->U, generics, qualified names (A.B), P & Q, and T?/T!.
  */
 ASTNode *parse_type(Parser *p) {
+  if (parser_recurse_enter(p) != 0) {
+    parse_error_push(p, "%s:%u:%u: type too deeply nested",
+                     p->src->filename, p_tok(p)->line, p_tok(p)->col);
+    return NULL;
+  }
+  ASTNode *node = parse_type_inner(p);
+  parser_recurse_leave(p);
+  return node;
+}
+
+/** @brief Type parsing body — kept separate so parse_type's recursion guard
+ *  wraps the entire grammar rule with a single enter/leave pair. */
+static ASTNode *parse_type_inner(Parser *p) {
   ASTNode *node = alloc_node(p, AST_TYPE_IDENT);
   if (!node) return NULL;
 

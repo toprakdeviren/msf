@@ -49,26 +49,35 @@ static const BuilderEntry *find_builder(SemaContext *ctx, const char *name) {
 }
 
 /**
- * @brief Checks if a node has a preceding @BuilderType attribute.
+ * @brief Checks if a declaration carries a @BuilderType attribute.
  *
- * Walks backwards through siblings to find an immediately preceding
- * AST_ATTRIBUTE and matches against registered @resultBuilder types.
+ * Primary path: walk @p node's own children for AST_ATTRIBUTE nodes
+ * (parser now attaches them structurally).  Fallback: previous sibling,
+ * for any attribute that still emerged at sibling position (statement-
+ * level fallback, hash-directive paths).
  */
 const BuilderEntry *node_get_builder(SemaContext *ctx, const ASTNode *node) {
-  if (!node || !node->parent)
-    return NULL;
-  for (const ASTNode *sib = node->parent->first_child; sib;
-       sib = sib->next_sibling) {
-    if (sib->next_sibling != node)
-      continue;
-    if (sib->kind != AST_ATTRIBUTE)
-      break;
-    const Token *at = &ctx->tokens[sib->data.var.name_tok];
+  if (!node) return NULL;
+  /* Children-attached attributes (preferred). */
+  for (const ASTNode *c = node->first_child; c; c = c->next_sibling) {
+    if (c->kind != AST_ATTRIBUTE) continue;
+    const Token *at = &ctx->tokens[c->data.var.name_tok];
     const char *attr_name = sema_intern(ctx, ctx->src->data + at->pos, at->len);
     const BuilderEntry *be = find_builder(ctx, attr_name);
-    if (be)
-      return be;
-    break;
+    if (be) return be;
+  }
+  /* Backward-compat sibling lookup. */
+  if (node->parent) {
+    for (const ASTNode *sib = node->parent->first_child; sib;
+         sib = sib->next_sibling) {
+      if (sib->next_sibling != node) continue;
+      if (sib->kind != AST_ATTRIBUTE) break;
+      const Token *at = &ctx->tokens[sib->data.var.name_tok];
+      const char *attr_name = sema_intern(ctx, ctx->src->data + at->pos, at->len);
+      const BuilderEntry *be = find_builder(ctx, attr_name);
+      if (be) return be;
+      break;
+    }
   }
   return NULL;
 }

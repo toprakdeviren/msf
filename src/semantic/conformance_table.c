@@ -17,11 +17,21 @@
  * Conformance Table
  * ═══════════════════════════════════════════════════════════════════════════════ */
 
+/** @brief Grows the entries array geometrically.  Returns 0 on success, -1 OOM. */
+static int conformance_table_grow(ConformanceTable *ct) {
+  uint32_t new_cap = ct->capacity ? ct->capacity * 2 : CONFORMANCE_TABLE_INIT_CAP;
+  ConformanceRecord *p = realloc(ct->entries, (size_t)new_cap * sizeof(*p));
+  if (!p) return -1;
+  ct->entries  = p;
+  ct->capacity = new_cap;
+  return 0;
+}
+
 /** @brief Registers an unconditional conformance: type_name conforms to protocol_name. */
 void conformance_table_add(ConformanceTable *ct, const char *type_name,
                            const char *protocol_name) {
-  if (!ct || ct->count >= CONFORMANCE_TABLE_MAX)
-    return;
+  if (!ct) return;
+  if (ct->count >= ct->capacity && conformance_table_grow(ct) != 0) return;
   ct->entries[ct->count].type_name = type_name;
   ct->entries[ct->count].protocol_name = protocol_name;
   ct->entries[ct->count].where_ast = NULL;
@@ -33,8 +43,8 @@ void conformance_table_add_conditional(ConformanceTable *ct,
                                        const char *type_name,
                                        const char *protocol_name,
                                        const void *where_ast) {
-  if (!ct || ct->count >= CONFORMANCE_TABLE_MAX)
-    return;
+  if (!ct) return;
+  if (ct->count >= ct->capacity && conformance_table_grow(ct) != 0) return;
   ct->entries[ct->count].type_name = type_name;
   ct->entries[ct->count].protocol_name = protocol_name;
   ct->entries[ct->count].where_ast = where_ast;
@@ -74,19 +84,28 @@ int conformance_table_has(const ConformanceTable *ct, const char *type_name,
  * Associated Type Table
  * ═══════════════════════════════════════════════════════════════════════════════ */
 
-/** @brief Resets the associated-type table to empty. */
+/** @brief Resets the associated-type table to empty (keeps allocated buffer). */
 void assoc_type_table_init(AssocTypeTable *at) {
-  if (at)
-    at->count = 0;
+  if (at) at->count = 0;
+}
+
+/** @brief Grows the entries array geometrically.  Returns 0 OK, -1 OOM. */
+static int assoc_type_table_grow(AssocTypeTable *at) {
+  uint32_t new_cap = at->capacity ? at->capacity * 2 : ASSOC_TYPE_TABLE_INIT_CAP;
+  AssocTypeBinding *p = realloc(at->entries, (size_t)new_cap * sizeof(*p));
+  if (!p) return -1;
+  at->entries  = p;
+  at->capacity = new_cap;
+  return 0;
 }
 
 /** @brief Binds an associated type: (type, protocol, assoc) -> concrete name. */
 void assoc_type_table_add(AssocTypeTable *at, const char *type_name,
                           const char *protocol_name, const char *assoc_name,
                           const char *concrete_type_name) {
-  if (!at || at->count >= ASSOC_TYPE_TABLE_MAX || !type_name ||
-      !protocol_name || !assoc_name || !concrete_type_name)
+  if (!at || !type_name || !protocol_name || !assoc_name || !concrete_type_name)
     return;
+  if (at->count >= at->capacity && assoc_type_table_grow(at) != 0) return;
   at->entries[at->count].type_name = type_name;
   at->entries[at->count].protocol_name = protocol_name;
   at->entries[at->count].assoc_name = assoc_name;
@@ -222,8 +241,9 @@ table_lookup:
  * Collection, Sendable, Codable, and other commonly used protocols.
  */
 void conformance_table_init_builtins(ConformanceTable *ct) {
-  if (!ct)
-    return;
+  if (!ct) return;
+  /* Reset count but preserve any already-allocated buffer (this function may
+   * be called on a reused table). */
   ct->count = 0;
 
   /* ── Int ──────────────────────────────────────────────────────────────────── */

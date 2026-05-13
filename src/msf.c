@@ -13,6 +13,7 @@
  */
 
 #include "internal/msf.h"
+#include "internal/lexer.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -22,13 +23,20 @@
  * ═══════════════════════════════════════════════════════════════════════════════ */
 
 struct MSFResult {
-  Source       src;
-  TokenStream  ts;
-  ASTNode      *root;
-  ASTArena     ast_arena;
-  TypeArena    type_arena;
-  Parser       *parser;
-  SemaContext  *sema;
+  Source           src;
+  /* Heap-allocated copy of the input source text.  Owned by the result so
+   * the caller can free their buffer immediately after msf_analyze returns
+   * without invalidating tokens, AST source ranges, or diagnostics. */
+  char            *src_buf;
+  /* Heap-allocated copy of the filename (or NULL if caller passed NULL). */
+  char            *src_filename;
+  TokenStream      ts;
+  LexerDiagnostics lex_diag;
+  ASTNode         *root;
+  ASTArena         ast_arena;
+  TypeArena        type_arena;
+  Parser          *parser;
+  SemaContext     *sema;
 
   /* Token streams owned by sub-expression re-parses (msf_parse_expression).
    * Each TokenStream is heap-allocated; released alongside the result. */
@@ -63,13 +71,34 @@ MSFResult *msf_analyze(const char *code, const char *filename) {
   MSFResult *r = calloc(1, sizeof(MSFResult));
   if (!r) return NULL;
 
-  r->src.data = code;
-  r->src.len = strlen(code);
-  r->src.filename = filename ? filename : "<input>";
+  /* Copy the source so the result owns its backing memory.  Tokens, AST
+   * nodes, and diagnostics all reference into this buffer; the caller may
+   * free their input immediately after we return. */
+  size_t code_len = strlen(code);
+  r->src_buf = malloc(code_len + 1);
+  if (!r->src_buf) { msf_result_free(r); return NULL; }
+  memcpy(r->src_buf, code, code_len + 1);
 
-  /* 1. Tokenize */
+  const char *fname = filename ? filename : "<input>";
+  size_t fname_len = strlen(fname);
+  r->src_filename = malloc(fname_len + 1);
+  if (!r->src_filename) { msf_result_free(r); return NULL; }
+  memcpy(r->src_filename, fname, fname_len + 1);
+
+  r->src.data = r->src_buf;
+  r->src.len = code_len;
+  r->src.filename = r->src_filename;
+
+  /* 1. Tokenize.  Pre-allocate so lexer_tokenize reuses our buffer; on OOM
+   * the stream may be missing TOK_EOF and feeding it to the parser would
+   * cause out-of-bounds reads. */
   token_stream_init(&r->ts, r->src.len / 4 + 64);
-  lexer_tokenize(&r->src, &r->ts, 1, NULL);
+  if (!r->ts.tokens) { msf_result_free(r); return NULL; }
+  lexer_diag_init(&r->lex_diag);
+  if (lexer_tokenize(&r->src, &r->ts, 1, &r->lex_diag) != 0) {
+    msf_result_free(r);
+    return NULL;
+  }
 
   /* 2. Parse */
   ast_arena_init(&r->ast_arena, 0);
@@ -88,7 +117,7 @@ MSFResult *msf_analyze(const char *code, const char *filename) {
 /**
  * @brief Frees all resources held by an analysis result.
  *
- * Destruction order mirrors creation order in reverse: sema → parser →
+ * Destruction order mirrors generation order in reverse: sema → parser →
  * type arena → AST arena → token stream → result struct.
  */
 void msf_result_free(MSFResult *r) {
@@ -104,6 +133,8 @@ void msf_result_free(MSFResult *r) {
   }
   free(r->sub_ts);
   token_stream_free(&r->ts);
+  free(r->src_buf);
+  free(r->src_filename);
   free(r);
 }
 
@@ -175,19 +206,30 @@ size_t msf_token_count(const MSFResult *r) {
 /* ═══════════════════════════════════════════════════════════════════════════════
  * Error Accessors
  *
- * Parser and sema errors are combined into a single flat index space:
- * indices [0, parser_count) are parser errors, [parser_count, total) are sema.
+ * Lexer, parser, and sema diagnostics share a single flat index space in
+ * pipeline order:
+ *   [0, lex)               lexer diagnostics
+ *   [lex, lex+par)         parser diagnostics
+ *   [lex+par, total)       sema diagnostics
  * ═══════════════════════════════════════════════════════════════════════════════ */
 
-/** @brief Returns the total number of errors (parser + sema combined). */
+static inline uint32_t msf_lex_count(const MSFResult *r) {
+  return (uint32_t)r->lex_diag.count;
+}
+
+/** @brief Returns the total number of errors (lexer + parser + sema). */
 uint32_t msf_error_count(const MSFResult *r) {
   if (!r) return 0;
-  return parser_error_count(r->parser) + sema_error_count(r->sema);
+  return msf_lex_count(r) + parser_error_count(r->parser)
+       + sema_error_count(r->sema);
 }
 
 /** @brief Returns the error message at index i. */
 const char *msf_error_message(const MSFResult *r, uint32_t i) {
   if (!r) return "";
+  uint32_t lc = msf_lex_count(r);
+  if (i < lc) return r->lex_diag.message[i];
+  i -= lc;
   uint32_t pc = parser_error_count(r->parser);
   return (i < pc) ? parser_error_message(r->parser, i)
                   : sema_error_message(r->sema, i - pc);
@@ -196,6 +238,9 @@ const char *msf_error_message(const MSFResult *r, uint32_t i) {
 /** @brief Returns the 1-based line number for error at index i. */
 uint32_t msf_error_line(const MSFResult *r, uint32_t i) {
   if (!r) return 0;
+  uint32_t lc = msf_lex_count(r);
+  if (i < lc) return r->lex_diag.line[i];
+  i -= lc;
   uint32_t pc = parser_error_count(r->parser);
   return (i < pc) ? parser_error_line(r->parser, i)
                   : sema_error_line(r->sema, i - pc);
@@ -204,6 +249,9 @@ uint32_t msf_error_line(const MSFResult *r, uint32_t i) {
 /** @brief Returns the 1-based column number for error at index i. */
 uint32_t msf_error_col(const MSFResult *r, uint32_t i) {
   if (!r) return 0;
+  uint32_t lc = msf_lex_count(r);
+  if (i < lc) return r->lex_diag.col[i];
+  i -= lc;
   uint32_t pc = parser_error_count(r->parser);
   return (i < pc) ? parser_error_col(r->parser, i)
                   : sema_error_col(r->sema, i - pc);
@@ -212,6 +260,10 @@ uint32_t msf_error_col(const MSFResult *r, uint32_t i) {
 /** @brief Returns the source byte offset where the error starts. */
 uint32_t msf_error_start_offset(const MSFResult *r, uint32_t i) {
   if (!r) return 0;
+  uint32_t lc = msf_lex_count(r);
+  /* Lexer diagnostics don't track byte ranges yet. */
+  if (i < lc) return 0;
+  i -= lc;
   uint32_t pc = parser_error_count(r->parser);
   /* Parser doesn't track byte ranges yet — fall back to 0 for parser errors */
   return (i < pc) ? 0 : sema_error_start(r->sema, i - pc);
@@ -220,6 +272,9 @@ uint32_t msf_error_start_offset(const MSFResult *r, uint32_t i) {
 /** @brief Returns the source byte offset where the error ends. */
 uint32_t msf_error_end_offset(const MSFResult *r, uint32_t i) {
   if (!r) return 0;
+  uint32_t lc = msf_lex_count(r);
+  if (i < lc) return 0;
+  i -= lc;
   uint32_t pc = parser_error_count(r->parser);
   return (i < pc) ? 0 : sema_error_end(r->sema, i - pc);
 }

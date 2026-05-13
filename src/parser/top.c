@@ -31,37 +31,67 @@ static int try_consume_contextual_mod(Parser *p, const char *ck, size_t ck_len,
   return 0;
 }
 
-/** @brief Parses @attributes, returning the first one found (or NULL). */
-static ASTNode *parse_attributes(Parser *p, uint32_t *extra_mods) {
+/** @brief Parses one `@Attr` (consumes the leading `@`).  Returns the
+ *  attribute node, or NULL if the attribute was a marker that doesn't
+ *  produce a node (@testable). */
+static ASTNode *parse_single_attribute(Parser *p, uint32_t *extra_mods) {
+  adv(p);  /* '@' */
+
+  /* @testable import — consume and mark, no attribute node */
+  if (p_tok(p)->type == TOK_IDENTIFIER && p_is_ck(p, CK_TESTABLE) &&
+      p->pos + 1 < p->ts->count &&
+      p->ts->tokens[p->pos + 1].keyword == KW_IMPORT) {
+    p->import_is_testable = 1;
+    adv(p);
+    return NULL;
+  }
+
+  ASTNode *attr = alloc_node(p, AST_ATTRIBUTE);
+  if (!attr) return NULL;
+  attr->data.var.name_tok = (uint32_t)p->pos;
+
+  if (p_is_ident_str(p, CK_MAIN_ACTOR))
+    *extra_mods |= MOD_MAIN_ACTOR;
+
+  if (p_tok(p)->type == TOK_IDENTIFIER || p_tok(p)->type == TOK_KEYWORD)
+    adv(p);
+  if (P_LPAREN(p))
+    skip_balanced(p, '(', ')');
+  attr->tok_end = (uint32_t)p->pos;
+  return attr;
+}
+
+/** @brief Parses a run of `@A @B(args) @C` attributes into a linked list
+ *  via `next_sibling`.  Returns the head, with `*out_tail` pointing at the
+ *  last node so callers can splice the chain into a declaration's
+ *  children. */
+static ASTNode *parse_attribute_chain(Parser *p, uint32_t *extra_mods,
+                                      ASTNode **out_tail) {
+  ASTNode *head = NULL, *tail = NULL;
   while (!p_is_eof(p) && p_tok(p)->type == TOK_OPERATOR &&
          p->src->data[p_tok(p)->pos] == '@') {
-    adv(p);
-
-    /* @testable import — consume and mark, no attribute node */
-    if (p_tok(p)->type == TOK_IDENTIFIER &&
-        p_is_ck(p, CK_TESTABLE) &&
-        p->pos + 1 < p->ts->count &&
-        p->ts->tokens[p->pos + 1].keyword == KW_IMPORT) {
-      p->import_is_testable = 1;
-      adv(p);
-      return NULL;
-    }
-
-    ASTNode *attr = alloc_node(p, AST_ATTRIBUTE);
-    if (!attr) return NULL;
-    attr->data.var.name_tok = (uint32_t)p->pos;
-
-    if (p_is_ident_str(p, CK_MAIN_ACTOR))
-      *extra_mods |= MOD_MAIN_ACTOR;
-
-    if (p_tok(p)->type == TOK_IDENTIFIER || p_tok(p)->type == TOK_KEYWORD)
-      adv(p);
-    if (P_LPAREN(p))
-      skip_balanced(p, '(', ')');
-    attr->tok_end = (uint32_t)p->pos;
-    return attr;
+    ASTNode *a = parse_single_attribute(p, extra_mods);
+    if (!a) continue;
+    if (!head) head = a;
+    if (tail)  tail->next_sibling = a;
+    tail = a;
   }
-  return NULL;
+  if (out_tail) *out_tail = tail;
+  return head;
+}
+
+/** @brief Attaches an attribute chain (linked via next_sibling) as the
+ *  leading children of @p decl.  Each attribute's parent/next_sibling is
+ *  re-linked so the decl owns the chain structurally.  No-op if either
+ *  argument is NULL. */
+static void attach_attribute_chain(ASTNode *decl, ASTNode *head) {
+  if (!decl || !head) return;
+  for (ASTNode *a = head, *next; a; a = next) {
+    next = a->next_sibling;
+    a->next_sibling = NULL;
+    a->parent       = NULL;
+    ast_add_child(decl, a);
+  }
 }
 
 /** @brief Collects contextual modifiers before the keyword switch. */
@@ -165,10 +195,13 @@ static ASTNode *try_parse_labeled_stmt(Parser *p) {
 ASTNode *parse_decl_stmt(Parser *p) {
   if (p_is_eof(p)) return NULL;
 
-  /* @attributes */
+  /* @attributes — collect a chain so we can attach them structurally to
+   * whatever declaration follows, instead of emitting them as bare siblings.
+   * Sema looks for AST_ATTRIBUTE *children* of the decl (see callers in
+   * semantic/) so attachment is no longer inferred from adjacency. */
   uint32_t extra_mods = 0;
-  ASTNode *attr = parse_attributes(p, &extra_mods);
-  if (attr) return attr;
+  ASTNode *attr_tail = NULL;
+  ASTNode *attr_head = parse_attribute_chain(p, &extra_mods, &attr_tail);
 
   /* Contextual modifiers: nonisolated, indirect, convenience, required */
   extra_mods |= collect_contextual_modifiers(p);
@@ -181,11 +214,13 @@ ASTNode *parse_decl_stmt(Parser *p) {
   try_consume_contextual_mod(p, CK_REQUIRED, sizeof(CK_REQUIRED) - 1,
                              KW_INIT, MOD_REQUIRED, &mods);
 
-  if (p_is_eof(p)) return NULL;
+  ASTNode *result = NULL;
+
+  if (p_is_eof(p)) goto done;
 
   /* prefix/postfix/infix operator or func */
   ASTNode *fixity = try_parse_fixity_decl(p, mods);
-  if (fixity) return fixity;
+  if (fixity) { result = fixity; goto done; }
 
   /* Keyword-driven declarations and statements */
   if (p_tok(p)->type == TOK_KEYWORD) {
@@ -196,64 +231,65 @@ ASTNode *parse_decl_stmt(Parser *p) {
         adv(p);
         ASTNode *n = parse_var_decl(p, 1, mods);
         if (n) n->data.var.is_async_let = 1;
-        return n;
+        result = n; goto done;
       }
       break;
-    case KW_FUNC:         return parse_func_decl(p, mods);
-    case KW_VAR:          return parse_var_decl(p, 0, mods);
+    case KW_FUNC:         result = parse_func_decl(p, mods);       goto done;
+    case KW_VAR:          result = parse_var_decl(p, 0, mods);      goto done;
     case KW_LET: {
       ASTNode *n = parse_var_decl(p, 1, mods);
       if (n && (mods & MOD_ASYNC)) n->data.var.is_async_let = 1;
-      return n;
+      result = n; goto done;
     }
-    case KW_CLASS:        return parse_nominal(p, AST_CLASS_DECL, mods);
-    case KW_STRUCT:       return parse_nominal(p, AST_STRUCT_DECL, mods);
-    case KW_ENUM:         return parse_nominal(p, AST_ENUM_DECL, mods);
-    case KW_PROTOCOL:     return parse_nominal(p, AST_PROTOCOL_DECL, mods);
-    case KW_EXTENSION:    return parse_nominal(p, AST_EXTENSION_DECL, mods);
-    case KW_ACTOR:        return parse_nominal(p, AST_ACTOR_DECL, mods);
-    case KW_IMPORT:       return parse_import_decl(p);
-    case KW_TYPEALIAS:    return parse_typealias(p, mods);
-    case KW_INIT:         return parse_init_decl(p, mods);
-    case KW_DEINIT:       return parse_deinit_decl(p);
-    case KW_SUBSCRIPT:    return parse_subscript_decl(p, mods);
-    case KW_PRECEDENCEGROUP: return parse_precedence_group_decl(p);
+    case KW_CLASS:        result = parse_nominal(p, AST_CLASS_DECL,     mods); goto done;
+    case KW_STRUCT:       result = parse_nominal(p, AST_STRUCT_DECL,    mods); goto done;
+    case KW_ENUM:         result = parse_nominal(p, AST_ENUM_DECL,      mods); goto done;
+    case KW_PROTOCOL:     result = parse_nominal(p, AST_PROTOCOL_DECL,  mods); goto done;
+    case KW_EXTENSION:    result = parse_nominal(p, AST_EXTENSION_DECL, mods); goto done;
+    case KW_ACTOR:        result = parse_nominal(p, AST_ACTOR_DECL,     mods); goto done;
+    case KW_IMPORT:       result = parse_import_decl(p);                       goto done;
+    case KW_TYPEALIAS:    result = parse_typealias(p, mods);                   goto done;
+    case KW_INIT:         result = parse_init_decl(p, mods);                   goto done;
+    case KW_DEINIT:       result = parse_deinit_decl(p);                       goto done;
+    case KW_SUBSCRIPT:    result = parse_subscript_decl(p, mods);              goto done;
+    case KW_PRECEDENCEGROUP: result = parse_precedence_group_decl(p);          goto done;
 
     /* — Statements — */
-    case KW_RETURN:       return parse_return(p);
-    case KW_THROW:        return parse_throw(p);
-    case KW_IF:           return parse_if(p);
-    case KW_GUARD:        return parse_guard(p);
-    case KW_FOR:          return parse_for(p);
-    case KW_WHILE:        return parse_while(p);
-    case KW_REPEAT:       return parse_repeat(p);
-    case KW_DO:           return parse_do(p);
-    case KW_DEFER:        return parse_defer(p);
-    case KW_DISCARD:      return parse_discard(p);
-    case KW_SWITCH:       return parse_switch(p);
-    case KW_BREAK:        return parse_jump(p, AST_BREAK_STMT);
-    case KW_CONTINUE:     return parse_jump(p, AST_CONTINUE_STMT);
-    case KW_FALLTHROUGH:  return parse_jump(p, AST_FALLTHROUGH_STMT);
+    case KW_RETURN:       result = parse_return(p);                  goto done;
+    case KW_THROW:        result = parse_throw(p);                   goto done;
+    case KW_IF:           result = parse_if(p);                      goto done;
+    case KW_GUARD:        result = parse_guard(p);                   goto done;
+    case KW_FOR:          result = parse_for(p);                     goto done;
+    case KW_WHILE:        result = parse_while(p);                   goto done;
+    case KW_REPEAT:       result = parse_repeat(p);                  goto done;
+    case KW_DO:           result = parse_do(p);                      goto done;
+    case KW_DEFER:        result = parse_defer(p);                   goto done;
+    case KW_DISCARD:      result = parse_discard(p);                 goto done;
+    case KW_SWITCH:       result = parse_switch(p);                  goto done;
+    case KW_BREAK:        result = parse_jump(p, AST_BREAK_STMT);    goto done;
+    case KW_CONTINUE:     result = parse_jump(p, AST_CONTINUE_STMT); goto done;
+    case KW_FALLTHROUGH:  result = parse_jump(p, AST_FALLTHROUGH_STMT); goto done;
     default: break;
     }
   }
 
   /* precedencegroup (contextual — may be lexed as identifier) */
   if (p_tok(p)->type == TOK_IDENTIFIER &&
-      tok_text_eq(p, CK_PRECEDENCEGROUP_ID, sizeof(CK_PRECEDENCEGROUP_ID) - 1))
-    return parse_precedence_group_decl(p);
+      tok_text_eq(p, CK_PRECEDENCEGROUP_ID, sizeof(CK_PRECEDENCEGROUP_ID) - 1)) {
+    result = parse_precedence_group_decl(p);
+    goto done;
+  }
 
   /* Hash directives */
-  if (is_hash_directive(p))
-    return parse_hash_directive(p);
+  if (is_hash_directive(p)) { result = parse_hash_directive(p); goto done; }
 
   /* Labeled statement: `label: for/while/repeat { }` */
   ASTNode *labeled = try_parse_labeled_stmt(p);
-  if (labeled) return labeled;
+  if (labeled) { result = labeled; goto done; }
 
   /* Expression statement (fallback) */
   ASTNode *expr = parse_expr_pratt(p, 0);
-  if (expr) return make_expr_stmt(p, expr);
+  if (expr) { result = make_expr_stmt(p, expr); goto done; }
 
   /* Unknown token — skip with diagnostic (semicolons are silent) */
   if (!p_is_eof(p)) {
@@ -266,7 +302,23 @@ ASTNode *parse_decl_stmt(Parser *p) {
                        (int)p_tok(p)->len, p->src->data + p_tok(p)->pos);
   }
   adv(p);
-  return NULL;
+
+done:
+  /* Attach any leading @attributes structurally to the produced node.  If
+   * there is no node (statement-level token we skipped, EOF, etc.) the
+   * chain has nowhere to live — emit it as a sibling so the tokens at
+   * least round-trip in dumps. */
+  if (attr_head) {
+    if (result) {
+      attach_attribute_chain(result, attr_head);
+    } else {
+      /* Return only the chain head; caller's add_stmt_chain will splice
+       * the rest of the chain via next_sibling. */
+      (void)attr_tail;
+      return attr_head;
+    }
+  }
+  return result;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════════

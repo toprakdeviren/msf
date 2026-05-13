@@ -26,10 +26,11 @@
  *         don't mistake a truncated list for "no further errors". */
 #define MAX_SEMA_ERRORS       64
 
-/** @brief Max user-defined precedence groups per source file. */
+/* The MAX_PRECEDENCE_GROUPS and MAX_CUSTOM_OPERATORS caps used to bound the
+ * per-Parser arrays in private.h; those tables are now heap-grown so the
+ * limits no longer apply.  Retained as guidance values for tools that want
+ * to pre-size buffers. */
 #define MAX_PRECEDENCE_GROUPS 32
-
-/** @brief Max user-defined custom operators per source file. */
 #define MAX_CUSTOM_OPERATORS  64
 
 /* ── Semantic Analysis ────────────────────────────────────────────────────── */
@@ -37,16 +38,18 @@
 /** @brief Max precedence group names for duplicate checking. */
 #define SEMA_PG_NAMES_MAX     32
 
-/** @brief Intern pool hash table capacity (must be power of 2). */
+/** @brief Initial intern hash-table capacity (grows on demand; must be a
+ *  power of 2). */
 #define INTERN_POOL_CAP      4096
 
-/** @brief Intern pool string buffer size in bytes (256 KB). */
+/** @brief Legacy buffer size — no longer enforced now that the intern pool
+ *  uses a chunked, growable buffer.  Retained for source compatibility. */
 #define INTERN_BUF_SIZE      (256 * 1024)
 
-/** @brief Max entries in the protocol conformance table. */
+/* Conformance and associated-type tables are now heap-grown (see msf.h).
+ * The previous MAX caps no longer apply; macros retained for compatibility
+ * with downstream code that referenced them. */
 #define CONFORMANCE_TABLE_MAX 256
-
-/** @brief Max entries in the associated-type binding table. */
 #define ASSOC_TYPE_TABLE_MAX  128
 
 /** @brief Max registered @propertyWrapper types. */

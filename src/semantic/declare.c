@@ -67,21 +67,34 @@ static uint32_t effective_access(uint32_t mods) {
 }
 
 /**
- * @brief Checks if a preceding sibling is an @attribute matching @p attr_name.
+ * @brief Returns the first @attribute child of @p node matching @p attr_name.
  *
- * Common pattern: walk siblings to find the AST_ATTRIBUTE just before a decl.
- * Returns the attribute node, or NULL if not found.
+ * Attributes are now structurally owned by their target declaration (the
+ * parser splices `@A @B class C` so the attribute nodes become children of
+ * the class decl).  Fallback: also scan a preceding sibling, since hash
+ * directives and other non-decl producers may still leave attributes at
+ * sibling position.
  */
 static const ASTNode *find_preceding_attr(SemaContext *ctx, const ASTNode *node,
                                           const char *attr_name) {
-  if (!node->parent) return NULL;
-  for (const ASTNode *sib = node->parent->first_child; sib;
-       sib = sib->next_sibling) {
-    if (sib->next_sibling != node) continue;
-    if (sib->kind != AST_ATTRIBUTE) return NULL;
-    const Token *at = &ctx->tokens[sib->data.var.name_tok];
+  if (!node) return NULL;
+  /* Preferred path: attribute is a child of the decl. */
+  for (const ASTNode *c = node->first_child; c; c = c->next_sibling) {
+    if (c->kind != AST_ATTRIBUTE) continue;
+    const Token *at = &ctx->tokens[c->data.var.name_tok];
     const char *name = sema_intern(ctx, ctx->src->data + at->pos, at->len);
-    return strcmp(name, attr_name) == 0 ? sib : NULL;
+    if (strcmp(name, attr_name) == 0) return c;
+  }
+  /* Backward-compat fallback: previous sibling. */
+  if (node->parent) {
+    for (const ASTNode *sib = node->parent->first_child; sib;
+         sib = sib->next_sibling) {
+      if (sib->next_sibling != node) continue;
+      if (sib->kind != AST_ATTRIBUTE) return NULL;
+      const Token *at = &ctx->tokens[sib->data.var.name_tok];
+      const char *name = sema_intern(ctx, ctx->src->data + at->pos, at->len);
+      return strcmp(name, attr_name) == 0 ? sib : NULL;
+    }
   }
   return NULL;
 }
@@ -368,22 +381,37 @@ static void register_result_builder(SemaContext *ctx, ASTNode *node,
  * @propertyWrapper Usage Detection
  * ═══════════════════════════════════════════════════════════════════════════════ */
 
-/** @brief Detects @WrapperType annotation on var/let declarations. */
+/** @brief Detects @WrapperType annotation on var/let declarations.
+ *
+ *  Attributes are usually attached as children of the declaration (parser
+ *  splices the @ chain into the decl's first_child list).  Older paths may
+ *  still leave an attribute at sibling position; check both.
+ */
 static void detect_wrapper_usage(SemaContext *ctx, ASTNode *node) {
   if (node->kind != AST_VAR_DECL && node->kind != AST_LET_DECL) return;
-  if (node->data.var.has_wrapper || ctx->wrapper_count == 0 || !node->parent)
-    return;
+  if (node->data.var.has_wrapper || ctx->wrapper_count == 0) return;
 
-  for (const ASTNode *sib = node->parent->first_child; sib;
-       sib = sib->next_sibling) {
-    if (sib->next_sibling != node) continue;
-    if (sib->kind != AST_ATTRIBUTE) break;
-    const Token *at = &ctx->tokens[sib->data.var.name_tok];
+  const ASTNode *attr = NULL;
+  for (const ASTNode *c = node->first_child; c; c = c->next_sibling) {
+    if (c->kind == AST_ATTRIBUTE) { attr = c; break; }
+  }
+  if (!attr && node->parent) {
+    for (const ASTNode *sib = node->parent->first_child; sib;
+         sib = sib->next_sibling) {
+      if (sib->next_sibling != node) continue;
+      if (sib->kind == AST_ATTRIBUTE) attr = sib;
+      break;
+    }
+  }
+  if (!attr) return;
+
+  {
+    const Token *at = &ctx->tokens[attr->data.var.name_tok];
     const char *attr_name = sema_intern(ctx, ctx->src->data + at->pos, at->len);
     for (uint32_t i = 0; i < ctx->wrapper_count; i++) {
       if (strcmp(ctx->wrapper_types[i].name, attr_name) == 0) {
         node->data.var.has_wrapper = 1;
-        node->data.var.wrapper_type_tok = sib->data.var.name_tok;
+        node->data.var.wrapper_type_tok = attr->data.var.name_tok;
         /* If the wrapper exposes a projectedValue, synthesise a sibling
          * symbol named `$x` in the same scope. Type is filled in pass 2,
          * once the wrapper struct's projectedValue declaration has been
@@ -404,7 +432,6 @@ static void detect_wrapper_usage(SemaContext *ctx, ASTNode *node) {
         break;
       }
     }
-    break;
   }
 }
 

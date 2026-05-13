@@ -111,6 +111,12 @@ struct Parser {
   size_t             pos;     /**< Current position in the token stream.   */
   ASTArena          *arena;   /**< Arena for node allocations (not owned). */
 
+  /* Recursion budget — guards against stack overflow on pathological input
+   * like `((((((x))))))` or `[[[[[Int]]]]]`.  Bumped on entry to each
+   * recursive grammar rule, decremented on exit. */
+  uint32_t recursion_depth;
+  uint32_t max_recursion_depth;
+
   /* Diagnostics */
   uint32_t error_count;
   char     errors[MAX_PARSE_ERRORS][256];
@@ -123,12 +129,38 @@ struct Parser {
   uint8_t setter_access;        /**< Setter access from private(set) etc. */
   uint8_t import_is_testable;   /**< @testable import seen.               */
 
-  /* Custom operators / precedence groups (per source file) */
-  ParserPrecGroup pg_table[MAX_PRECEDENCE_GROUPS];
-  int             pg_count;
-  ParserCustomOp  custom_ops[MAX_CUSTOM_OPERATORS];
-  int             custom_op_count;
+  /* Custom operators / precedence groups (per source file).  Both tables
+   * are heap-grown geometrically — there is no fixed cap that, if exceeded,
+   * silently drops a registration. */
+  ParserPrecGroup *pg_table;
+  int              pg_count;
+  int              pg_capacity;
+  ParserCustomOp  *custom_ops;
+  int              custom_op_count;
+  int              custom_op_capacity;
 };
+
+/** @brief Default soft cap on parser recursion depth.  Tuned to keep
+ *  worst-case stack use comfortably below 1 MiB even on WASM. */
+#define PARSER_DEFAULT_MAX_RECURSION 256
+
+/** @brief RAII-ish guard for entering a recursive grammar rule.
+ *
+ *  Increments the parser's depth counter and returns 0 on success.  If the
+ *  budget is exhausted, records a diagnostic, leaves the counter untouched,
+ *  and returns -1 — callers should bail out (return NULL).  Pair every
+ *  successful PARSER_RECURSE_ENTER with PARSER_RECURSE_LEAVE. */
+static inline int parser_recurse_enter(Parser *p) {
+  if (p->recursion_depth >= p->max_recursion_depth) {
+    return -1;
+  }
+  p->recursion_depth++;
+  return 0;
+}
+
+static inline void parser_recurse_leave(Parser *p) {
+  if (p->recursion_depth > 0) p->recursion_depth--;
+}
 
 typedef enum { PARSE_OK = 0, PARSE_ERROR = 1 } ParseStatus;
 
@@ -145,14 +177,24 @@ typedef struct {
  *  All O(1).  No token consumption — just inspection.
  */
 
-/** @brief Returns the current token (no consume). */
+/** @brief Static EOF sentinel returned when the stream is exhausted or
+ *  empty.  Defined in core.c.  Never advance past it. */
+extern const Token PARSER_EOF_SENTINEL;
+
+/** @brief Returns the current token (no consume).  Falls back to a static
+ *  EOF sentinel if the stream is empty or @p p->pos is past the end —
+ *  guards against truncated streams (e.g. lexer OOM that dropped EOF). */
 static inline const Token *p_tok(const Parser *p) {
+  if (!p->ts || !p->ts->tokens || p->pos >= p->ts->count)
+    return &PARSER_EOF_SENTINEL;
   return &p->ts->tokens[p->pos];
 }
 
-/** @brief Peeks one token ahead (no consume). */
+/** @brief Peeks one token ahead (no consume).  Same EOF-sentinel guard. */
 static inline const Token *p_peek1(const Parser *p) {
-  size_t next = p->pos + 1 < p->ts->count ? p->pos + 1 : p->pos;
+  if (!p->ts || !p->ts->tokens) return &PARSER_EOF_SENTINEL;
+  size_t next = p->pos + 1;
+  if (next >= p->ts->count) return &PARSER_EOF_SENTINEL;
   return &p->ts->tokens[next];
 }
 

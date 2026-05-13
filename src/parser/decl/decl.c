@@ -33,12 +33,17 @@
  * inside the block.
  */
 ASTNode *parse_block(Parser *p) {
-  ASTNode *node = alloc_node(p, AST_BLOCK);
-  if (!node)
+  if (parser_recurse_enter(p) != 0) {
+    parse_error_push(p, "%s:%u:%u: block too deeply nested",
+                     p->src->filename, p_tok(p)->line, p_tok(p)->col);
     return NULL;
+  }
+  ASTNode *node = alloc_node(p, AST_BLOCK);
+  if (!node) { parser_recurse_leave(p); return NULL; }
   if (!P_LBRACE(p)) {
     parse_error_push(p, "%s:%u:%u: expected '{'", p->src->filename,
                      p_tok(p)->line, p_tok(p)->col);
+    parser_recurse_leave(p);
     return node;
   }
   adv(p);
@@ -51,6 +56,7 @@ ASTNode *parse_block(Parser *p) {
   if (P_RBRACE(p))
     adv(p);
   node->tok_end = (uint32_t)p->pos;
+  parser_recurse_leave(p);
   return node;
 }
 

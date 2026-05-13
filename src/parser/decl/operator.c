@@ -27,11 +27,14 @@ static int p_is_colon(const Parser *p) {
   return 0;
 }
 
-/** @brief Skips to the next attribute boundary (';' or '}' or newline). */
+/** @brief Skips to the next attribute boundary (';' or '}' or newline).
+ *  has_leading_newline on the NEXT token marks the line break — the lexer
+ *  filters TOK_NEWLINE itself but preserves the flag. */
 static void skip_to_attr_end(Parser *p) {
-  while (!p_is_eof(p) && !P_RBRACE(p) &&
-         cur_char(p) != ';' && p_tok(p)->type != TOK_NEWLINE)
+  while (!p_is_eof(p) && !P_RBRACE(p) && cur_char(p) != ';') {
     adv(p);
+    if (!p_is_eof(p) && p_tok(p)->has_leading_newline) break;
+  }
   if (p_is_punct(p, ';')) adv(p);
 }
 

@@ -69,7 +69,8 @@ Token lexer_next(Lexer *lexer) {
       lexer->line,
       lexer->col,
       KW_NONE,
-      OP_NONE
+      OP_NONE,
+      0
     };
 
   const uint32_t sp = lexer->pos, sl = lexer->line, sc = lexer->col;
@@ -89,14 +90,15 @@ Token lexer_next(Lexer *lexer) {
       sl,
       sc,
       KW_NONE,
-      OP_NONE
+      OP_NONE,
+      0
     };
   }
 
   /* Whitespace */
   if (act == 0 && cls == CC_WHITESPACE) {
     while (lexer->pos < len && LEX_CHAR_CLASS[s[lexer->pos]] == CC_WHITESPACE) ADVANCE(lexer);
-    return (Token){TOK_WHITESPACE, sp, (uint32_t)(lexer->pos - sp), sl, sc, KW_NONE, OP_NONE};
+    return (Token){TOK_WHITESPACE, sp, (uint32_t)(lexer->pos - sp), sl, sc, KW_NONE, OP_NONE, 0};
   }
 
   /* Identifier / keyword */
@@ -119,12 +121,13 @@ Token lexer_next(Lexer *lexer) {
         sl,
         sc,
         KW_NONE,
-        OP_NONE
+        OP_NONE,
+        0
       };
     }
     lexer->col += tl; lexer->pos += tl;
     Keyword kw = map_kw_id(kw_id);
-    return (Token){kw ? TOK_KEYWORD : TOK_IDENTIFIER, sp, tl, sl, sc, kw, OP_NONE};
+    return (Token){kw ? TOK_KEYWORD : TOK_IDENTIFIER, sp, tl, sl, sc, kw, OP_NONE, 0};
   }
 
   /* Number */
@@ -132,7 +135,7 @@ Token lexer_next(Lexer *lexer) {
     uint32_t ttype = TT_INTEGER_LITERAL, tl = scan_number(s, lexer->pos, len, &ttype);
     lexer->col += tl; lexer->pos += tl;
     return (Token){(ttype == TT_FLOAT_LITERAL) ? TOK_FLOAT_LIT : TOK_INTEGER_LIT,
-                   sp, tl, sl, sc, KW_NONE, OP_NONE};
+                   sp, tl, sl, sc, KW_NONE, OP_NONE, 0};
   }
 
   /* String */
@@ -153,42 +156,71 @@ Token lexer_next(Lexer *lexer) {
  *
  * Calls lexer_next() in a loop until TOK_EOF.  When skip_ws is set,
  * whitespace, newline, and comment tokens are filtered out — the parser
- * typically doesn't need them.  The stream is always terminated by TOK_EOF.
+ * typically doesn't need them.  The stream is always terminated by TOK_EOF
+ * on success.
  *
  * Memory: pre-allocates an estimated token count (src->len / 4, clamped
- * to [512, 16M]) and shrinks the array afterward if it's less than half used.
- * The caller must call token_stream_free() when done.
+ * to [512, 16M]) only if @p out is uninitialized (capacity == 0).  Callers
+ * that already initialized the stream keep their allocation.  Shrinks the
+ * array afterward if it's less than half used.  The caller must call
+ * token_stream_free() when done.
  *
  * Safety: the loop is bounded at src->len * 4 + 1024 iterations to prevent
  * infinite loops from lexer bugs — in practice, each iteration consumes
- * at least one byte.
+ * at least one byte.  On allocation failure, the function returns -1; the
+ * stream may be partial and MUST NOT be handed to the parser.
  *
  * @param src      Source to tokenize.
  * @param out      Receives the token stream (caller frees with token_stream_free).
  * @param skip_ws  If non-zero, filter whitespace/newline/comment tokens.
  * @param diag     Diagnostic accumulator (may be NULL to ignore errors).
- * @return         0 on success (always succeeds — errors are recorded in diag).
+ * @return         0 on success, -1 on out-of-memory.
  */
 int lexer_tokenize(const Source *src, TokenStream *out, int skip_ws,
                    LexerDiagnostics *diag) {
-  size_t est = src->len / 4;
-  if (est < 512)    est = 512;
-  if (est > 1u<<24) est = 1u << 24;
+  /* Only initialize if caller didn't already.  This prevents the double-init
+   * leak when msf_analyze pre-allocates the stream. */
+  if (out->capacity == 0 && out->tokens == NULL) {
+    size_t est = src->len / 4;
+    if (est < 512)    est = 512;
+    if (est > 1u<<24) est = 1u << 24;
+    token_stream_init(out, est);
+    if (!out->tokens) return -1;
+  }
 
-  token_stream_init(out, est);
   Lexer l;
   lexer_init(&l, src);
   l.diag = diag;
 
+  /* When skip_ws drops TOK_NEWLINE tokens we still preserve the *fact* that
+   * a newline occurred by setting has_leading_newline on the next retained
+   * token.  Parser code that needs line-break sensitivity (generic-call
+   * disambiguation, directive condition end, operator decl line scoping)
+   * reads this flag instead of looking for a newline token that will never
+   * appear in the filtered stream. */
+  int pending_newline = 0;
   for (size_t n = (size_t)src->len * 4 + 1024, i = 0; i < n; i++) {
     Token t = lexer_next(&l);
-    if (!(skip_ws && (t.type == TOK_WHITESPACE || t.type == TOK_NEWLINE || t.type == TOK_COMMENT)))
-      token_stream_push(out, t);
+    int is_trivia = skip_ws && (t.type == TOK_WHITESPACE ||
+                                t.type == TOK_NEWLINE ||
+                                t.type == TOK_COMMENT);
+    if (is_trivia) {
+      if (t.type == TOK_NEWLINE) pending_newline = 1;
+    } else {
+      if (pending_newline) {
+        t.has_leading_newline = 1;
+        pending_newline = 0;
+      }
+      if (token_stream_push(out, t) != 0) return -1;
+    }
     if (t.type == TOK_EOF) break;
   }
 
-  if (out->count == 0 || out->tokens[out->count - 1].type != TOK_EOF)
-    token_stream_push(out, (Token){TOK_EOF, l.pos, 0, l.line, l.col, KW_NONE, OP_NONE});
+  if (out->count == 0 || out->tokens[out->count - 1].type != TOK_EOF) {
+    Token eof = {TOK_EOF, l.pos, 0, l.line, l.col, KW_NONE, OP_NONE, 0};
+    if (pending_newline) eof.has_leading_newline = 1;
+    if (token_stream_push(out, eof) != 0) return -1;
+  }
 
   if (out->count > 0 && out->count < out->capacity / 2) {
     Token *shrink = realloc(out->tokens, out->count * sizeof(Token));

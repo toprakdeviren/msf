@@ -23,10 +23,17 @@
  * Token Navigation
  * ═══════════════════════════════════════════════════════════════════════════════ */
 
-/** @brief Advances the parser by one token and returns the consumed token. */
+/** @brief Static EOF token returned by p_tok / p_peek1 when the stream is
+ *  truncated.  Position fields are zero — callers that read line/col on an
+ *  out-of-stream token will get a benign 0:0.  Never advance past it. */
+const Token PARSER_EOF_SENTINEL = {TOK_EOF, 0, 0, 0, 0, KW_NONE, OP_NONE, 0};
+
+/** @brief Advances the parser by one token and returns the consumed token.
+ *  At EOF (or when the stream is empty/truncated) returns the static
+ *  sentinel and leaves @p->pos untouched. */
 const Token *adv(Parser *p) {
-  const Token *t = &p->ts->tokens[p->pos];
-  if (!p_is_eof(p))
+  const Token *t = p_tok(p);
+  if (t->type != TOK_EOF && p->pos < p->ts->count)
     p->pos++;
   return t;
 }
@@ -377,11 +384,15 @@ static int p_is_decl_start(const Parser *p) {
   }
 }
 
-/** @brief Skips a #if / #elseif condition (tokens until body boundary). */
+/** @brief Skips a #if / #elseif condition (tokens until body boundary).
+ *
+ *  The line break that originally terminated the directive condition is
+ *  signalled by `has_leading_newline` on the next token — the lexer's
+ *  skip_ws path filters TOK_NEWLINE itself but preserves the flag. */
 static void skip_directive_condition(Parser *p) {
   adv(p);
   while (!p_is_eof(p)) {
-    if (p_tok(p)->type == TOK_NEWLINE)           { adv(p); return; }
+    if (p_tok(p)->has_leading_newline)           return;
     if (P_LPAREN(p))                      { skip_balanced(p, '(', ')'); continue; }
     if (P_LBRACE(p) || P_RBRACE(p)) return;
     if (p_is_decl_start(p))                      return;
@@ -390,13 +401,13 @@ static void skip_directive_condition(Parser *p) {
   }
 }
 
-/** @brief Skips to line boundary (best effort for unknown directives). */
+/** @brief Skips to the next line boundary (best effort for unknown
+ *  directives).  Stops when the next token carries a leading newline. */
 static void skip_to_line_end(Parser *p) {
-  while (!p_is_eof(p) && p_tok(p)->type != TOK_NEWLINE &&
-         !P_LBRACE(p) && !P_RBRACE(p))
+  while (!p_is_eof(p) && !P_LBRACE(p) && !P_RBRACE(p)) {
     adv(p);
-  if (!p_is_eof(p) && p_tok(p)->type == TOK_NEWLINE)
-    adv(p);
+    if (!p_is_eof(p) && p_tok(p)->has_leading_newline) return;
+  }
 }
 
 /**
@@ -441,6 +452,7 @@ void parser_ctx_reset(Parser *p, const Source *src, const TokenStream *ts,
   p->ts = ts;
   p->pos = 0;
   p->arena = arena;
+  p->max_recursion_depth = PARSER_DEFAULT_MAX_RECURSION;
 }
 
 /**
@@ -472,10 +484,12 @@ void parser_destroy(Parser *p) {
   if (!p) return;
   for (int i = 0; i < p->pg_count; i++)
     free(p->pg_table[i].name);
+  free(p->pg_table);
   for (int i = 0; i < p->custom_op_count; i++) {
     free(p->custom_ops[i].op);
     free(p->custom_ops[i].group_name);
   }
+  free(p->custom_ops);
   free(p);
 }
 

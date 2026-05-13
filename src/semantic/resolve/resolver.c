@@ -704,18 +704,18 @@ TypeInfo *resolve_node(SemaContext *ctx, ASTNode *node) {
  * ───────────────────────────────────────────────────────
  */
 int sema_analyze(SemaContext *ctx, ASTNode *root) {
-  /* Initialize conformance table and register builtins */
-  static ConformanceTable s_ctable;
+  /* Fallback allocation for tables when the caller bypassed sema_init.
+   * (Tests sometimes construct SemaContext directly.)  These now own
+   * heap-grown buffers, so they MUST be heap-allocated — no statics. */
   if (!ctx->conformance_table) {
-    memset(&s_ctable, 0, sizeof(s_ctable));
-    conformance_table_init_builtins(&s_ctable);
-    ctx->conformance_table = &s_ctable;
+    ctx->conformance_table = calloc(1, sizeof(ConformanceTable));
+    if (ctx->conformance_table)
+      conformance_table_init_builtins(ctx->conformance_table);
   }
-  /* Associated type bindings (typealias Item = X in conforming type) */
-  static AssocTypeTable s_atable;
   if (!ctx->assoc_type_table) {
-    memset(&s_atable, 0, sizeof(s_atable));
-    ctx->assoc_type_table = &s_atable;
+    ctx->assoc_type_table = calloc(1, sizeof(AssocTypeTable));
+    if (ctx->assoc_type_table)
+      assoc_type_table_init(ctx->assoc_type_table);
   }
 
   /* Collect precedence group names so operator decls can reference them */

@@ -137,7 +137,12 @@ static Token scan_triple_quoted(Lexer *l, const uint8_t *s, uint32_t len,
 static Token scan_regular_string(Lexer *l, const uint8_t *s, uint32_t len,
                                  uint32_t sp, uint32_t sl, uint32_t sc) {
   uint32_t extra = 0, tl = scan_string_body(s, l->pos, len, &extra);
-  if (l->pos + tl > len) {
+  /* scan_string_body returns (len - pos) on unterminated input, the same
+   * shape as a string that closes exactly at EOF.  Distinguish by checking
+   * the trailing byte: a terminated string ends with the matching quote. */
+  uint8_t quote = s[l->pos];
+  int terminated = (tl >= 2 && s[l->pos + tl - 1] == quote);
+  if (!terminated) {
     lexer_diag_record(l, sl, sc, DIAG_UNTERM_STRING);
   } else if (tl > 2) {
     uint32_t el, ec;
@@ -214,7 +219,7 @@ Token scan_raw_string(Lexer *l, const uint8_t *s, uint32_t len,
   uint32_t hc = 0, hp = l->pos;
   while (hp < len && s[hp] == '#') { hc++; hp++; }
   if (hp >= len || s[hp] != '"')
-    return (Token){TOK_UNKNOWN, 0, 0, 0, 0, KW_NONE, OP_NONE};
+    return (Token){TOK_UNKNOWN, 0, 0, 0, 0, KW_NONE, OP_NONE, 0};
 
   int triple = (hp + 2 < len && IS_TRIPLE_QUOTE(s, hp));
   hp += triple ? 3 : 1;
@@ -236,5 +241,5 @@ Token scan_raw_string(Lexer *l, const uint8_t *s, uint32_t len,
   lexer_diag_record(l, sl, sc, DIAG_UNTERM_RAW_STRING);
   uint32_t el = hp - l->pos;
   advance_past_token(l, s, l->pos, el, extra);
-  return (Token){TOK_UNKNOWN, sp, el, sl, sc, KW_NONE, OP_NONE};
+  return (Token){TOK_UNKNOWN, sp, el, sl, sc, KW_NONE, OP_NONE, 0};
 }

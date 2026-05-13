@@ -49,7 +49,10 @@ static ASTNode *parse_postfix_generic_call(Parser *p, ASTNode *lhs) {
           if (depth == 0) break;
         }
       }
-      if (st->type == TOK_NEWLINE || scan - p->pos > 16) break;
+      /* Stop probing if we cross a line boundary — generic specialization
+       * doesn't span newlines.  has_leading_newline is preserved by the
+       * lexer even though TOK_NEWLINE is filtered. */
+      if (st->has_leading_newline || scan - p->pos > 16) break;
       scan++;
     }
 
@@ -67,19 +70,24 @@ static ASTNode *parse_postfix_generic_call(Parser *p, ASTNode *lhs) {
 
     if (found_generic_call) {
       adv(p); /* '<' */
-      int d = 1;
-      while (!p_is_eof(p) && d > 0) {
-        if (p_tok(p)->type == TOK_OPERATOR && p_tok(p)->len == 1) {
-          char c = p->src->data[p_tok(p)->pos];
-          if (c == '<') d++;
-          else if (c == '>') { d--; adv(p); break; }
+      /* Parse the type-argument list as real AST nodes attached to the
+       * callee identifier.  Each argument is a full `parse_type` subtree,
+       * so generic specialization is structurally inspectable rather than
+       * only recoverable by re-scanning tokens between lhs->tok_idx+1 and
+       * lhs->tok_end-1.  We still extend lhs->tok_end to cover the angle
+       * brackets for backward compatibility with consumers that walk
+       * token ranges. */
+      while (!p_is_eof(p)) {
+        if (p_tok(p)->type == TOK_OPERATOR && p_tok(p)->len == 1 &&
+            p->src->data[p_tok(p)->pos] == '>') {
+          adv(p);
+          break;
         }
-        adv(p);
+        ASTNode *arg = parse_type(p);
+        if (arg) ast_add_child(lhs, arg);
+        else adv(p);  /* recovery: don't loop forever on garbage */
+        if (P_COMMA(p)) adv(p);
       }
-      // Extend the LHS token range to include the angle-bracketed args so
-      // downstream IR passes can recover the generic specialization (e.g.
-      // map HMAC<SHA384> → __ck_hmac_sha384) by scanning lhs->tok_idx+1
-      // through lhs->tok_end-1 for type-name tokens.
       lhs->tok_end = (uint32_t)p->pos;
       return lhs;
     }

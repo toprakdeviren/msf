@@ -172,6 +172,11 @@ typedef struct {
   uint32_t  col;        /**< 1-based column number.                      */
   Keyword   keyword;    /**< Which keyword (KW_NONE if not a keyword).   */
   OpKind    op_kind;    /**< Which operator (OP_NONE if single-char).    */
+  uint8_t   has_leading_newline; /**< 1 if at least one newline was
+                                  *   filtered out between the previous
+                                  *   token and this one — preserved by
+                                  *   lexer_tokenize even when skip_ws
+                                  *   discards the newline token itself. */
 } Token;
 
 /* — Token stream (flat array, filled by lexer) ---------------------------- */
@@ -636,6 +641,10 @@ const char *msf_version(void);
  *
  * This is the main entry point.  One call does everything.
  *
+ * The result owns its own copy of @p code and @p filename — the caller may
+ * free both buffers as soon as msf_analyze returns.  Tokens, AST source
+ * ranges, and diagnostics all point into the owned copy.
+ *
  * @param code      NUL-terminated Swift source code.
  * @param filename  File name for diagnostics, or NULL for "\<input\>".
  * @return          Analysis result (opaque).  NULL on allocation failure.
@@ -1016,7 +1025,8 @@ static inline const char *type_primary_protocol_name(const TypeInfo *ty) {
  *  tables or drive protocol dispatch.
  */
 
-#define CONFORMANCE_TABLE_MAX 256
+/** @brief Initial conformance-table capacity.  Grows on demand. */
+#define CONFORMANCE_TABLE_INIT_CAP 64
 
 typedef struct {
   const char *type_name;
@@ -1024,9 +1034,12 @@ typedef struct {
   const void *where_ast;  /**< AST_WHERE_CLAUSE for conditional conformance. */
 } ConformanceRecord;
 
+/** @brief Dynamic conformance table.  Entries are heap-allocated and
+ *  grow geometrically; conformance_table_free() releases them. */
 typedef struct ConformanceTable {
-  ConformanceRecord entries[CONFORMANCE_TABLE_MAX];
-  uint32_t          count;
+  ConformanceRecord *entries;
+  uint32_t           count;
+  uint32_t           capacity;
 } ConformanceTable;
 
 /** @brief Register all built-in Swift conformances (Int: Equatable, …). */
@@ -1059,7 +1072,8 @@ int         conformance_table_has(const ConformanceTable *ct,
  *  (type, protocol, assoc_name) → concrete_type_name
  */
 
-#define ASSOC_TYPE_TABLE_MAX 128
+/** @brief Initial associated-type binding capacity.  Grows on demand. */
+#define ASSOC_TYPE_TABLE_INIT_CAP 32
 
 typedef struct {
   const char *type_name;
@@ -1068,9 +1082,11 @@ typedef struct {
   const char *concrete_type_name;
 } AssocTypeBinding;
 
+/** @brief Dynamic associated-type binding table. */
 typedef struct {
-  AssocTypeBinding entries[ASSOC_TYPE_TABLE_MAX];
-  uint32_t         count;
+  AssocTypeBinding *entries;
+  uint32_t          count;
+  uint32_t          capacity;
 } AssocTypeTable;
 
 void        assoc_type_table_init(AssocTypeTable *at);

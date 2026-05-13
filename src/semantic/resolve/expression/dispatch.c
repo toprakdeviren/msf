@@ -297,9 +297,14 @@ TypeInfo *resolve_node_expr(SemaContext *ctx, ASTNode *node) {
         }
       }
     }
+    /* Type-mismatch check.  Carve-outs match resolve_binary_expr's `=` path
+     * so the parser switching `=` from AST_BINARY_EXPR to AST_ASSIGN_EXPR
+     * doesn't change diagnostics. */
     if (lt && rt && !type_equal(lt, rt) && lt->kind != TY_UNKNOWN &&
-        rt->kind != TY_UNKNOWN && lt->kind != TY_NAMED &&
-        rt->kind != TY_NAMED) {
+        rt->kind != TY_UNKNOWN && lt->kind != TY_PROTOCOL_COMPOSITION &&
+        lt->kind != TY_TUPLE && rt->kind != TY_TUPLE &&
+        !(lt->kind == TY_OPTIONAL && lt->inner &&
+          type_equal(lt->inner, rt))) {
       int is_empty_collection_literal = 0;
       if (rhs && rhs->kind == AST_ARRAY_LITERAL && !rhs->first_child &&
           (lt->kind == TY_ARRAY || lt->kind == TY_SET || lt->kind == TY_DICT)) {
