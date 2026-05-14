@@ -125,12 +125,24 @@ static void strip_underscores(char *buf) {
   *w = '\0';
 }
 
-/** @brief Allocates a literal node, consumes the token, wraps in postfix. */
-static ASTNode *make_literal(Parser *p, ASTNodeKind kind) {
+/** @brief Allocates a fresh literal node and consumes the token.  Does NOT
+ *  wrap in postfix — caller must fill payload (data.integer.ival,
+ *  data.flt.fval, data.boolean.bval) BEFORE calling parse_postfix, because
+ *  parse_postfix may chain `.member` onto the literal and return a wrapper
+ *  node whose data union slot then collides with the payload write. */
+static ASTNode *make_literal_node(Parser *p, ASTNodeKind kind) {
   ASTNode *n = alloc_node(p, kind);
   if (!n) return NULL;
   adv(p);
   n->tok_end = (uint32_t)p->pos;
+  return n;
+}
+
+/** @brief Convenience for value-less literals (nil, string, regex) — wraps
+ *  in postfix immediately since there is no payload to assign. */
+static ASTNode *make_literal(Parser *p, ASTNodeKind kind) {
+  ASTNode *n = make_literal_node(p, kind);
+  if (!n) return NULL;
   return parse_postfix(p, n);
 }
 
@@ -149,12 +161,16 @@ static void read_number_text(const Parser *p, const Token *lit, char *buf) {
  * underscore separators (1_000_000).
  */
 static ASTNode *parse_prefix_literal(Parser *p) {
-  /* true / false */
+  /* true / false — write payload into the literal node, THEN chain postfix.
+   * Doing it the other way around would let `.member` chains wrap the node
+   * and the payload write would corrupt the wrapper's data union (the bool/
+   * int/float bits land at the same offset as MEMBER_EXPR's name_tok). */
   if (p_is_kw(p, KW_TRUE) || p_is_kw(p, KW_FALSE)) {
     int val = p_is_kw(p, KW_TRUE);
-    ASTNode *n = make_literal(p, AST_BOOL_LITERAL);
-    if (n) n->data.boolean.bval = val;
-    return n;
+    ASTNode *n = make_literal_node(p, AST_BOOL_LITERAL);
+    if (!n) return NULL;
+    n->data.boolean.bval = val;
+    return parse_postfix(p, n);
   }
   /* nil */
   if (p_is_kw(p, KW_NIL))
@@ -168,17 +184,19 @@ static ASTNode *parse_prefix_literal(Parser *p) {
     const char *start = buf;
     if (buf[0] == '0' && buf[1] == 'b')     { base = 2; start = buf + 2; }
     else if (buf[0] == '0' && buf[1] == 'o') { base = 8; start = buf + 2; }
-    ASTNode *n = make_literal(p, AST_INTEGER_LITERAL);
-    if (n) n->data.integer.ival = (int64_t)strtoll(start, NULL, base);
-    return n;
+    ASTNode *n = make_literal_node(p, AST_INTEGER_LITERAL);
+    if (!n) return NULL;
+    n->data.integer.ival = (int64_t)strtoll(start, NULL, base);
+    return parse_postfix(p, n);
   }
   /* 3.14, 1_000.5 */
   if (p_tok(p)->type == TOK_FLOAT_LIT) {
     char buf[48];
     read_number_text(p, p_tok(p), buf);
-    ASTNode *n = make_literal(p, AST_FLOAT_LITERAL);
-    if (n) n->data.flt.fval = strtod(buf, NULL);
-    return n;
+    ASTNode *n = make_literal_node(p, AST_FLOAT_LITERAL);
+    if (!n) return NULL;
+    n->data.flt.fval = strtod(buf, NULL);
+    return parse_postfix(p, n);
   }
   /* "hello" */
   if (p_tok(p)->type == TOK_STRING_LIT)

@@ -70,10 +70,30 @@ WASM_LIB     = $(WASM_DIR)/libMiniSwiftFrontend.a
 # ── Targets ───────────────────────────────────────────────────────────────────
 # ── Test build ───────────────────────────────────────────────────────────────
 TESTDIR    = $(ROOT)tests
-TEST_SRCS  = $(wildcard $(TESTDIR)/*.c)
+# Exclude swift_corpus_main.c — it has its own main() and is built into a
+# separate `swift_corpus_runner` binary by the test-swift-corpus target.
+TEST_SRCS  = $(filter-out $(TESTDIR)/swift_corpus_main.c, $(wildcard $(TESTDIR)/*.c))
 TEST_BIN   = $(BUILDDIR)/test_runner
 
-.PHONY: all debug release wasm dist clean codegen test
+# ── Swift corpus runner (Option A: apple/swift test/Parse parity) ────────────
+# Sparse-clones apple/swift's test directories under build/swift-corpus/ and
+# walks them with a standalone runner.  Mirrors the libwgsl `make test-cts`
+# pattern: exploratory by default, --strict to gate the build.
+SWIFT_CORPUS_REPO ?= https://github.com/apple/swift
+SWIFT_CORPUS_REF  ?= main
+SWIFT_CORPUS_DIR  ?= $(BUILDDIR)/swift-corpus
+# Subdirectories under apple/swift/test/ that exercise the parser + sema
+# layers msf actually implements.  SILGen / IRGen / runtime / Demangle etc.
+# test backend code and would produce mostly noise.  Override with
+# `SWIFT_CORPUS_SUBS="test/Parse test/Sema"` for a narrower run.
+SWIFT_CORPUS_SUBS ?= test/Parse test/Sema test/decl test/expr test/stmt test/type test/Constraints test/Generics
+# Walk one level above the per-sub roots; the runner recurses.
+SWIFT_CORPUS_WALK ?= $(SWIFT_CORPUS_DIR)/test
+SWIFT_CORPUS_ARGS ?= --max-failures 30 --quiet
+SWIFT_CORPUS_RUNNER = $(BUILDDIR)/swift_corpus_runner
+
+.PHONY: all debug release wasm dist clean codegen test \
+        swift-corpus-fetch test-swift-corpus
 
 all: debug
 
@@ -133,13 +153,50 @@ dist: release
 	@echo "     lib/      libMiniSwiftFrontend.a + libunicode.a"
 
 # ── Test: build and run unit tests ────────────────────────────────────────────
+# SWIFT_FIXTURES_DIR is baked in as an absolute path so the runner finds
+# tests/swift-fixtures/*.swift regardless of cwd at invocation time.
 test: debug
 	@printf "  %-7s %s\n" "LINK" "test_runner"
 	@$(CC) $(CFLAGS) -g -O0 $(INCLUDES) -I$(TESTDIR) \
+		-DSWIFT_FIXTURES_DIR=\"$(TESTDIR)/swift-fixtures\" \
 		$(TEST_SRCS) \
 		-L$(NATIVE_DIR) -lMiniSwiftFrontend \
 		-o $(TEST_BIN)
 	@$(TEST_BIN)
+
+# ── Swift corpus: sparse-clone + run ─────────────────────────────────────────
+# Sparse-clone only the parser/sema-relevant subdirs of apple/swift's test
+# tree.  The full repo is ~3 GB; with --filter=blob:none + sparse-checkout
+# we end up with a few hundred MB on disk.  `SWIFT_CORPUS_SUBS` is a
+# space-separated list of paths under the repo root.
+swift-corpus-fetch:
+	@if [ ! -d "$(SWIFT_CORPUS_DIR)/.git" ]; then \
+	    printf "  %-7s %s\n" "GIT" "$(SWIFT_CORPUS_REPO) -> $(SWIFT_CORPUS_DIR)"; \
+	    git clone --depth=1 --filter=blob:none --sparse --branch "$(SWIFT_CORPUS_REF)" \
+	        "$(SWIFT_CORPUS_REPO)" "$(SWIFT_CORPUS_DIR)" >/dev/null 2>&1 || { \
+	        echo "  clone failed"; exit 2; }; \
+	fi
+	@cd "$(SWIFT_CORPUS_DIR)" && \
+	    patterns=""; for sub in $(SWIFT_CORPUS_SUBS); do \
+	        patterns="$$patterns /$$sub/**"; \
+	    done; \
+	    git sparse-checkout set --no-cone $$patterns >/dev/null
+	@echo "  corpus walk root: $(SWIFT_CORPUS_WALK)"
+	@echo "  total .swift files: $$(find $(SWIFT_CORPUS_WALK) -name '*.swift' 2>/dev/null | wc -l | tr -d ' ')"
+
+$(SWIFT_CORPUS_RUNNER): debug $(TESTDIR)/swift_corpus_main.c $(TESTDIR)/stubs.c
+	@mkdir -p $(BUILDDIR)
+	@printf "  %-7s %s\n" "LINK" "swift_corpus_runner"
+	@$(CC) $(CFLAGS) -g -O0 $(INCLUDES) -I$(TESTDIR) \
+		$(TESTDIR)/swift_corpus_main.c $(TESTDIR)/stubs.c \
+		-L$(NATIVE_DIR) -lMiniSwiftFrontend \
+		-o $@
+
+test-swift-corpus: $(SWIFT_CORPUS_RUNNER) swift-corpus-fetch
+	@$(SWIFT_CORPUS_RUNNER) \
+	    --corpus "$(SWIFT_CORPUS_WALK)" \
+	    --report "$(BUILDDIR)/swift-corpus-report.json" \
+	    $(SWIFT_CORPUS_ARGS)
 
 clean:
 	rm -rf $(BUILDDIR) $(DISTDIR)

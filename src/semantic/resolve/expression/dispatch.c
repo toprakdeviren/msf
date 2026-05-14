@@ -417,8 +417,17 @@ TypeInfo *resolve_node_expr(SemaContext *ctx, ASTNode *node) {
     uint32_t i = 0;
     for (ASTNode *c = node->first_child; c; c = c->next_sibling, i++) {
       ty->tuple.elems[i] = resolve_node(ctx, c);
-      if (c->kind != AST_INTEGER_LITERAL && c->kind != AST_FLOAT_LITERAL &&
-          c->kind != AST_BOOL_LITERAL && c->data.binary.op_tok != 0) {
+      /* data.binary.op_tok is only meaningful for kinds that store a
+       * binary-style payload (BINARY / ASSIGN / CAST / UNARY).  Reading it
+       * for any other kind aliases an unrelated union slot — e.g. a CALL
+       * with a captures pointer or a MEMBER with a name_tok — and the
+       * resulting token index points past the stream.  Whitelist the kinds
+       * before touching it. */
+      int has_op_tok = (c->kind == AST_BINARY_EXPR ||
+                        c->kind == AST_ASSIGN_EXPR ||
+                        c->kind == AST_CAST_EXPR   ||
+                        c->kind == AST_UNARY_EXPR);
+      if (has_op_tok && c->data.binary.op_tok != 0) {
         const Token *lt = &ctx->tokens[c->data.binary.op_tok];
         if (lt->type == TOK_IDENTIFIER) {
           ty->tuple.labels[i] =
