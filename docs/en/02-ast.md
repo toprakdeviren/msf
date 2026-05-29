@@ -95,7 +95,7 @@ This file is the AST's **skeleton**. It allocates nodes, links them into a tree,
 
 ### Arena Allocator
 
-**Problem:** The parser creates thousands of nodes. Calling `malloc()` for each one is slow and causes memory fragmentation.
+**Problem:** The parser builds thousands of nodes. Calling `malloc()` for each one is slow and causes memory fragmentation.
 
 **Solution:** A chunk-based arena. Allocate a large block, place nodes sequentially, free everything at once when done.
 
@@ -353,7 +353,7 @@ printf("type: %s\n", type_to_string(root->first_child->type, buf, sizeof(buf)));
 msf_result_free(r);
 ```
 
-Note: You never create the arena, token stream, parser, or sema context yourself. `msf_analyze()` runs the entire pipeline, and `msf_result_free()` releases everything.
+Note: You never allocate the arena, token stream, parser, or sema context yourself. `msf_analyze()` runs the entire pipeline, and `msf_result_free()` releases everything.
 
 ---
 
@@ -363,4 +363,4 @@ Note: You never create the arena, token stream, parser, or sema context yourself
 
 ---
 
-*This document is part of the [msf](https://github.com/toprakdeviren/msf) project.*
+*This document is part of the [Ugur Toprakdeviren](https://github.com/toprakdeviren/msf) project.*

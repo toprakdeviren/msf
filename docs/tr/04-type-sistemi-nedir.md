@@ -582,4 +582,4 @@ type_arena_free(&arena);
 
 ---
 
-*Bu belge [MiniSwiftFrontend](https://github.com/ugurtoprakdeviren/MiniSwiftFrontend) projesinin bir parcasidir.*
+*Bu belge [Ugur Toprakdeviren](https://github.com/toprakdeviren/msf) projesinin bir parcasidir.*

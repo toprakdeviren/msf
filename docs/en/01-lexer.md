@@ -493,4 +493,4 @@ Keyword kw = map_kw_id(kw_id);
 
 ---
 
-*This document is part of the [msf](https://github.com/toprakdeviren/msf) project.*
+*This document is part of the [Ugur Toprakdeviren](https://github.com/toprakdeviren/msf) project.*

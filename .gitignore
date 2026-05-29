@@ -10,9 +10,6 @@ dist/
 *~
 .DS_Store
 
-# Claude
-.claude/
-
 # Codegen scripts (internal tooling, not shipped)
 scripts/
 

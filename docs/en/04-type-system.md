@@ -22,7 +22,7 @@ But this tree has no answers for questions like "what is Int?", "can a and b be 
 
 Every type is represented by a `TypeInfo` struct. These structs live inside an **arena**. The module handles the following tasks:
 
-- Type creation and memory management (arena allocator)
+- Type construction and memory management (arena allocator)
 - Exposing builtin types as singletons (`Int`, `String`, `Bool`, ...)
 - Comparing two types for equality
 - Converting a type to a human-readable string (`[String: Any]`, `(Int) -> Bool`)
@@ -206,7 +206,7 @@ Should sema allocate a new TypeInfo with `kind = TY_INT` every time it sees `Int
 
 ### Solution
 
-A **single** TypeInfo is created for each builtin type and stored in a global pointer:
+A **single** TypeInfo is built for each builtin type and stored in a global pointer:
 
 ```c
 TypeInfo *TY_BUILTIN_VOID   = NULL;
@@ -417,7 +417,7 @@ There is a separate branch for each compound type:
 |----------|-------------|
 | `TY_GENERIC_PARAM` | Looks up in `sub`; if found, returns the concrete type |
 | `TY_NAMED` | Looks up in `sub` (for type alias substitution) |
-| `TY_OPTIONAL`, `TY_ARRAY`, `TY_SET` | Substitutes `inner`; if changed, creates a new TypeInfo |
+| `TY_OPTIONAL`, `TY_ARRAY`, `TY_SET` | Substitutes `inner`; if changed, builds a new TypeInfo |
 | `TY_DICT` | Substitutes `key` and `value` |
 | `TY_FUNC` | Substitutes all `params[]` and `ret`, tracked via a `changed` flag |
 | `TY_GENERIC_INST` | Substitutes all `args[]` |
@@ -528,7 +528,7 @@ TypeArena arena;
 type_arena_init(&arena, 0);
 type_builtins_init(&arena);
 
-// 2. Create an [Int] type
+// 2. Build an [Int] type
 TypeInfo *arr = type_arena_alloc(&arena);
 arr->kind  = TY_ARRAY;
 arr->inner = TY_BUILTIN_INT;
@@ -582,4 +582,4 @@ type_arena_free(&arena);
 
 ---
 
-*This document is part of the [msf](https://github.com/toprakdeviren/msf) project.*
+*This document is part of the [Ugur Toprakdeviren](https://github.com/toprakdeviren/msf) project.*

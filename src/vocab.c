@@ -193,7 +193,7 @@ static VocabModule *vocab_module_get(MSFVocab *v, const char *name) {
 
 /**
  * @brief Adds a type to a module, deduplicating by name.
- * @param out_new  If non-NULL, set to 1 when a new entry was created, else 0.
+ * @param out_new  If non-NULL, set to 1 when a new entry was added, else 0.
  * @return The type's index (existing or new), or SIZE_MAX on allocation failure.
  */
 static size_t vocab_module_add(VocabModule *mod, const char *name, size_t len,
@@ -320,7 +320,7 @@ static int vocab_module_add_dep(VocabModule *mod, const char *name, size_t len) 
  * Lifecycle
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-MSFVocab *msf_vocab_create(void) {
+MSFVocab *msf_vocab_new(void) {
   return calloc(1, sizeof(MSFVocab));
 }
 
@@ -755,7 +755,7 @@ char *msf_vocab_serialize(const MSFVocab *v) {
 
 MSFVocab *msf_vocab_parse(const char *text) {
   if (!text) return NULL;
-  MSFVocab *v = msf_vocab_create();
+  MSFVocab *v = msf_vocab_new();
   if (!v) return NULL;
 
   VocabModule *cur = NULL;

@@ -255,7 +255,7 @@ int main(int argc, char **argv) {
     return 2;
   }
 
-  MSFVocab *v = msf_vocab_create();
+  MSFVocab *v = msf_vocab_new();
   if (!v) { fprintf(stderr, "out of memory\n"); return 1; }
 
   int failures = 0;

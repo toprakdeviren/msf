@@ -447,4 +447,4 @@ Keyword kw = map_kw_id(kw_id);
 
 ---
 
-*Bu belge [MiniSwiftFrontend](https://github.com/ugurtoprakdeviren/msf) projesinin bir parcasidir.*
+*Bu belge [Ugur Toprakdeviren](https://github.com/toprakdeviren/msf) projesinin bir parcasidir.*

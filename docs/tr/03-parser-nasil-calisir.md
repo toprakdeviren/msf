@@ -424,7 +424,7 @@ Parser'in "beyni" degil ama "sinir sistemi". 544 satir. Icerir:
 - `skip_balanced()`, `skip_generic_params()` — dengeleme atlayicilari
 - `parse_throws_clause()` — throws/rethrows/throws(ErrorType)
 - `parse_hash_directive()` — #if/#else/#endif
-- `parser_create()` / `parser_destroy()` — public lifecycle
+- `parser_init()` / `parser_destroy()` — public lifecycle
 - `parse_expression_from_cstring()` — string interpolation icin yardimci
 
 ### top.c — Dispatch
@@ -500,4 +500,4 @@ Parser'in "beyni" degil ama "sinir sistemi". 544 satir. Icerir:
 
 ---
 
-*Bu belge [MiniSwiftFrontend](https://github.com/ugurtoprakdeviren/MiniSwiftFrontend) projesinin bir parcasidir.*
+*Bu belge [Ugur Toprakdeviren](https://github.com/toprakdeviren/msf) projesinin bir parcasidir.*

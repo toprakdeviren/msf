@@ -190,7 +190,7 @@ struct MSFModule {
   size_t          nfiles, cap;
   ASTArena        ast_arena;   /* shared by every file's parser  */
   TypeArena       type_arena;  /* shared                          */
-  SemaContext    *sema;        /* created in msf_module_analyze   */
+  SemaContext    *sema;        /* allocated in msf_module_analyze */
   const MSFVocab *vocab;       /* optional; borrowed, not owned   */
   const MSFVocab *sdk_vocab;   /* optional global-fallback SDK vocab; borrowed */
   int             analyzed;
@@ -201,7 +201,7 @@ struct MSFModule {
   size_t          sub_ts_cap;
 };
 
-MSFModule *msf_module_create(void) {
+MSFModule *msf_module_new(void) {
   MSFModule *m = calloc(1, sizeof(MSFModule));
   if (!m) return NULL;
   ast_arena_init(&m->ast_arena, 0);

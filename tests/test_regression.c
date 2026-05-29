@@ -95,7 +95,7 @@ static void test_reg_tuple_substitute_no_double_free(void) {
   type_arena_init(&arena, 0);
   type_builtins_init(&arena);
 
-  /* Create a labeled tuple: (x: T, y: T) where T is generic */
+  /* Build a labeled tuple: (x: T, y: T) where T is generic */
   TypeInfo *param = type_arena_alloc(&arena);
   param->kind = TY_GENERIC_PARAM;
   param->param.name = "T";

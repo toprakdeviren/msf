@@ -1272,7 +1272,7 @@ MSFProject *msf_project_open(const char *root_dir) {
 MSFModule *msf_project_analyze_module(const MSFProject *p, size_t i) {
   if (!p || i >= p->count) return NULL;
   const ProjModule *m = &p->modules[i];
-  MSFModule *mm = msf_module_create();
+  MSFModule *mm = msf_module_new();
   if (!mm) return NULL;
   for (size_t j = 0; j < m->nfiles; j++) {
     char *src = slurp(m->files[j]);
@@ -1431,7 +1431,7 @@ MSFModule *msf_project_analyze_module_resolved(const MSFProject *p, size_t i,
   if (!p || i >= p->count) return NULL;
   const ProjModule *m = &p->modules[i];
 
-  MSFModule *mm = msf_module_create();
+  MSFModule *mm = msf_module_new();
   if (!mm) return NULL;
   for (size_t j = 0; j < m->nfiles; j++) {
     char *src = slurp(m->files[j]);

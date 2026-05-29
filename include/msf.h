@@ -693,7 +693,7 @@ MSFResult *msf_analyze_in_module(const char *code, const char *filename,
  *
  * @param code      Swift source (NUL-terminated).  Copied internally.
  * @param filename  File name for diagnostics, or NULL.
- * @param vocab     Loaded vocabulary (msf_vocab_parse / msf_vocab_create), or NULL.
+ * @param vocab     Loaded vocabulary (msf_vocab_parse / msf_vocab_new), or NULL.
  * @return          Result (free with msf_result_free), or NULL on allocation failure.
  */
 MSFResult *msf_analyze_with_vocab(const char *code, const char *filename,
@@ -716,7 +716,7 @@ void msf_result_free(MSFResult *r);
  * every file is resolved against it — so cross-file references resolve, with no
  * SDK stubs and no text concatenation (each file keeps its own source/tokens).
  *
- *   MSFModule *m = msf_module_create();
+ *   MSFModule *m = msf_module_new();
  *   msf_module_add_file(m, codeA, "A.swift");
  *   msf_module_add_file(m, codeB, "B.swift");
  *   msf_module_analyze(m);
@@ -727,8 +727,8 @@ void msf_result_free(MSFResult *r);
 /** @brief Opaque whole-module analysis unit.  Free with msf_module_free(). */
 typedef struct MSFModule MSFModule;
 
-/** @brief Creates an empty module.  NULL on allocation failure. */
-MSFModule *msf_module_create(void);
+/** @brief Allocates an empty module.  NULL on allocation failure. */
+MSFModule *msf_module_new(void);
 
 /**
  * @brief Lexes + parses one source file and adds it to the module.
@@ -850,7 +850,7 @@ void msf_module_free(MSFModule *m);
  * — browser (WASM), Windows — where no SDK, `xcrun`, or `.swiftinterface` exists.
  *
  *   // Generate (on a machine with the SDK):
- *   MSFVocab *v = msf_vocab_create();
+ *   MSFVocab *v = msf_vocab_new();
  *   msf_vocab_add_interface(v, "SwiftUI", swiftui_interface_src);
  *   char *text = msf_vocab_serialize(v);          // write to SwiftUI.msfvocab
  *
@@ -882,8 +882,8 @@ typedef enum {
 
 /* MSFVocab is forward-declared in §5 (opaque; free with msf_vocab_free()). */
 
-/** @brief Creates an empty vocabulary.  NULL on allocation failure. */
-MSFVocab *msf_vocab_create(void);
+/** @brief Allocates an empty vocabulary.  NULL on allocation failure. */
+MSFVocab *msf_vocab_new(void);
 
 /**
  * @brief Returns the SDK vocabulary compiled into the library.
@@ -954,7 +954,7 @@ char *msf_vocab_serialize(const MSFVocab *v);
 MSFVocab *msf_vocab_parse(const char *text);
 
 /**
- * @brief Adds a single (name, kind) type to @p module (creating it if needed),
+ * @brief Adds a single (name, kind) type to @p module (building it if needed),
  *        deduplicating by name.  For sources other than `.swiftinterface` — e.g.
  *        type names harvested from Objective-C framework headers.
  * @return 1 if newly added, 0 if duplicate / on failure.
@@ -1208,7 +1208,7 @@ MSFModule  *msf_project_analyze_module(const MSFProject *p, size_t i);
  *
  * Analyze modules in dependency order (see msf_project_module_dep): a module's
  * `import X` resolves X's types from @p shared_vocab once X has been analyzed.
- * Pass the SAME vocabulary (msf_vocab_create()) across the whole sweep; free it
+ * Pass the SAME vocabulary (msf_vocab_new()) across the whole sweep; free it
  * after.  This collapses the cross-module "undeclared type" surface.
  *
  * @return Analyzed module (free with msf_module_free()), or NULL.

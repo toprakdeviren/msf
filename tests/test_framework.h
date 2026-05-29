@@ -59,7 +59,7 @@ extern const char *_tf_suite;
 
 #define TEST_EXIT_CODE() (_tf_fail > 0 ? 1 : 0)
 
-/* Helper: create a Source + tokenize in one call */
+/* Helper: build a Source + tokenize in one call */
 static inline int test_tokenize(const char *code, Source *src, TokenStream *ts) {
   src->data = code;
   src->len = strlen(code);

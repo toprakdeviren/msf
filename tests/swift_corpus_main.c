@@ -343,7 +343,7 @@ static void run_one_forked(const char *path, int timeout_sec,
 
   int pipefd[2];
   if (pipe(pipefd) != 0) {
-    /* Pipe creation failed — fall back to inline (lose isolation but
+    /* Pipe setup failed — fall back to inline (lose isolation but
      * still produce a result). */
     free(out->path);
     run_one_inline(path, out);

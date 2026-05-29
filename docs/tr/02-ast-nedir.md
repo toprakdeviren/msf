@@ -328,4 +328,4 @@ Dikkat: arena, token stream, parser, sema — hiçbirini kendin oluşturmuyorsun
 
 ---
 
-*Bu belge [MiniSwiftFrontend](https://github.com/ugurtoprakdeviren/MiniSwiftFrontend) projesinin bir parçasıdır.*
+*Bu belge [Ugur Toprakdeviren](https://github.com/toprakdeviren/msf) projesinin bir parçasıdır.*

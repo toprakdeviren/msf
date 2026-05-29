@@ -619,9 +619,9 @@ VStackBuilder.buildBlock(
 | `transform_builder_body()` | Transform the body: if -> buildOptional, for -> buildArray, ... |
 | `build_block_call_from_stmts()` | Wrap statements into a `buildBlock(...)` call |
 | `wrap_in_build_expression()` | Wrap a single expression with `buildExpression(...)` |
-| `wrap_builder_method_call()` | Create a generic synthetic method call node |
+| `wrap_builder_method_call()` | Build a generic synthetic method call node |
 
-**Important:** This transformation happens **at the AST level**. New ASTNodes are created with `synth_node()`, existing nodes are duplicated with `clone_node()`. Token indices may be absent (synthetic nodes) -- error messages account for this by using the parent node's position.
+**Important:** This transformation happens **at the AST level**. New ASTNodes are built with `synth_node()`, existing nodes are duplicated with `clone_node()`. Token indices may be absent (synthetic nodes) -- error messages account for this by using the parent node's position.
 
 ---
 
@@ -770,4 +770,4 @@ msf_result_free(r);
 
 ---
 
-*This document is part of the [msf](https://github.com/toprakdeviren/msf) project.*
+*This document is part of the [Ugur Toprakdeviren](https://github.com/toprakdeviren/msf) project.*

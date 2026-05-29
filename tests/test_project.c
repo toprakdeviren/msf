@@ -129,7 +129,7 @@ static void test_project_resolves_cross_module(void) {
 
   /* Chain in dependency order: Alpha first publishes Widget into the shared
    * vocab, then Beta resolves `Widget` from it. */
-  MSFVocab *shared = msf_vocab_create();
+  MSFVocab *shared = msf_vocab_new();
   ASSERT_NOT_NULL(shared);
   MSFModule *ma = msf_project_analyze_module_resolved(p, (size_t)a, shared);
   ASSERT_NOT_NULL(ma); msf_module_free(ma);
@@ -220,7 +220,7 @@ static void test_project_reexport_folding_uses_parsed_imports(void) {
   int client = find_module(p, "Client");
   ASSERT(alpha >= 0 && ghost >= 0 && umbrella >= 0 && client >= 0);
 
-  MSFVocab *shared = msf_vocab_create();
+  MSFVocab *shared = msf_vocab_new();
   ASSERT_NOT_NULL(shared);
   MSFModule *ma = msf_project_analyze_module_resolved(p, (size_t)alpha, shared);
   ASSERT_NOT_NULL(ma); msf_module_free(ma);

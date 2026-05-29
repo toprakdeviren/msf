@@ -60,7 +60,7 @@ static const char *vocab_confs_of(const MSFVocab *v, const char *type_name) {
 
 static void test_extract_public_types(void) {
   TEST("vocab: extracts public nominal types + typealias");
-  MSFVocab *v = msf_vocab_create();
+  MSFVocab *v = msf_vocab_new();
   ASSERT_NOT_NULL(v);
 
   size_t added = msf_vocab_add_interface(v, "TestMod", kInterface);
@@ -78,7 +78,7 @@ static void test_extract_public_types(void) {
 
 static void test_extract_skips_non_public(void) {
   TEST("vocab: skips internal types; records extension targets (deduped)");
-  MSFVocab *v = msf_vocab_create();
+  MSFVocab *v = msf_vocab_new();
   ASSERT_NOT_NULL(v);
   msf_vocab_add_interface(v, "TestMod", kInterface);
 
@@ -105,7 +105,7 @@ static void test_extract_skips_non_public(void) {
 
 static void test_kinds(void) {
   TEST("vocab: records the correct declaration kinds");
-  MSFVocab *v = msf_vocab_create();
+  MSFVocab *v = msf_vocab_new();
   ASSERT_NOT_NULL(v);
   msf_vocab_add_interface(v, "TestMod", kInterface);
 
@@ -129,7 +129,7 @@ static void test_kinds(void) {
 
 static void test_roundtrip(void) {
   TEST("vocab: serialize → parse preserves modules and types");
-  MSFVocab *v = msf_vocab_create();
+  MSFVocab *v = msf_vocab_new();
   ASSERT_NOT_NULL(v);
   msf_vocab_add_interface(v, "TestMod", kInterface);
 
@@ -195,7 +195,7 @@ static void test_resolution_with_vocab(void) {
   msf_result_free(bare);
 
   /* With the module's vocabulary fed in, they resolve. */
-  MSFVocab *v = msf_vocab_create();
+  MSFVocab *v = msf_vocab_new();
   ASSERT_NOT_NULL(v);
   msf_vocab_add_interface(v, "TestMod", kInterface);
   size_t n = 0;
@@ -213,7 +213,7 @@ static void test_resolution_with_vocab(void) {
 
 static void test_import_resolves_via_vocab(void) {
   TEST("vocab: `import` resolves module types via loaded vocabulary");
-  MSFVocab *v = msf_vocab_create();
+  MSFVocab *v = msf_vocab_new();
   ASSERT_NOT_NULL(v);
   msf_vocab_add_interface(v, "Acme",
                           "public struct Widget {}\npublic protocol Drawable {}\n");
@@ -245,11 +245,11 @@ static void test_import_resolves_via_vocab(void) {
 
 static void test_module_vocab(void) {
   TEST("vocab: msf_module_set_vocabulary resolves imports whole-module");
-  MSFVocab *v = msf_vocab_create();
+  MSFVocab *v = msf_vocab_new();
   ASSERT_NOT_NULL(v);
   msf_vocab_add_interface(v, "Acme", "public struct Widget {}\n");
 
-  MSFModule *m = msf_module_create();
+  MSFModule *m = msf_module_new();
   ASSERT_NOT_NULL(m);
   ASSERT_EQ(msf_module_set_vocabulary(m, v), 0);
   msf_module_add_file(m, "import Acme\nlet w: Widget? = nil\n", "a.swift");
@@ -270,11 +270,11 @@ static void test_module_vocab(void) {
 static void test_empty_and_null(void) {
   TEST("vocab: empty/NULL inputs are handled safely");
   ASSERT_EQ(msf_vocab_add_interface(NULL, "M", "public struct S {}"), (size_t)0);
-  MSFVocab *v = msf_vocab_create();
+  MSFVocab *v = msf_vocab_new();
   ASSERT_NOT_NULL(v);
   ASSERT_EQ(msf_vocab_add_interface(v, "M", NULL), (size_t)0);
   ASSERT_EQ(msf_vocab_add_interface(v, "M", ""), (size_t)0);
-  ASSERT_EQ(msf_vocab_module_count(v), (size_t)1); /* "M" created, empty */
+  ASSERT_EQ(msf_vocab_module_count(v), (size_t)1); /* "M" added, empty */
   char *text = msf_vocab_serialize(v);
   ASSERT_NOT_NULL(text);
   free(text);
@@ -307,7 +307,7 @@ static void test_members_extract_and_roundtrip(void) {
       "public extension View {\n"          /* extension members fold onto View */
       "  func bringToFront()\n"
       "}\n";
-  MSFVocab *v = msf_vocab_create();
+  MSFVocab *v = msf_vocab_new();
   ASSERT_NOT_NULL(v);
   msf_vocab_add_interface(v, "UI", iface);
 
@@ -344,7 +344,7 @@ static void test_members_extract_and_roundtrip(void) {
 
 static void test_dependency_graph_and_closure(void) {
   TEST("vocab: import edges extracted + transitive closure (deps survive round-trip)");
-  MSFVocab *v = msf_vocab_create();
+  MSFVocab *v = msf_vocab_new();
   ASSERT_NOT_NULL(v);
   msf_vocab_add_interface(v, "A", "import B\npublic struct AX {}\n");
   msf_vocab_add_interface(v, "B", "import C\nimport Foundation\npublic struct BX {}\n");
@@ -542,7 +542,7 @@ static void test_init_check_leniency(void) {
 
 static void test_conformances_v3(void) {
   TEST("vocab: extracts + round-trips per-type conformances (v3)");
-  MSFVocab *v = msf_vocab_create();
+  MSFVocab *v = msf_vocab_new();
   ASSERT_NOT_NULL(v);
   msf_vocab_add_interface(
       v, "CoreGraphics",

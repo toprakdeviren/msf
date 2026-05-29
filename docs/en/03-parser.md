@@ -151,7 +151,7 @@ The parser does **not stop** on error -- it records the problem and continues sc
 
 ### parse_source_file() (top.c)
 
-The top-level function. It creates an `AST_SOURCE_FILE` node and enters the `parse_decl_stmt()` loop:
+The top-level function. It builds an `AST_SOURCE_FILE` node and enters the `parse_decl_stmt()` loop:
 
 ```c
 ASTNode *parse_source_file(Parser *p) {
@@ -169,7 +169,7 @@ Everything passes through here. It looks at the current token and routes to the 
 ```
 Token                           Calls
 -----                           -----
-@attribute                   -> AST_ATTRIBUTE node created
+@attribute                   -> AST_ATTRIBUTE node built
 public/static/final/...      -> collect_modifiers() + continue
 func                         -> parse_func_decl()
 var / let                    -> parse_var_decl()
@@ -558,4 +558,4 @@ void parser_ctx_reset(Parser *p, const Source *src, const TokenStream *ts,
 
 ---
 
-*This document is part of the [msf](https://github.com/toprakdeviren/msf) project.*
+*This document is part of the [Ugur Toprakdeviren](https://github.com/toprakdeviren/msf) project.*
