@@ -17,6 +17,19 @@ static const char *type_name_str(const TypeInfo *ty, char *buf, size_t sz) {
   return buf;
 }
 
+static int generic_param_has_conformance(const TypeInfo *ty,
+                                         const char *protocol_name) {
+  if (!ty || ty->kind != TY_GENERIC_PARAM || !protocol_name)
+    return 0;
+  for (uint32_t i = 0; i < ty->param.constraint_count; i++) {
+    const TypeConstraint *c = &ty->param.constraints[i];
+    if (c->kind == TC_CONFORMANCE && c->protocol_name &&
+        strcmp(c->protocol_name, protocol_name) == 0)
+      return 1;
+  }
+  return 0;
+}
+
 /**
  * @brief Checks conditional conformance for a generic instantiation.
  *
@@ -108,6 +121,9 @@ static int check_proto_conformance(const TypeInfo *concrete,
   if (!constraint->protocol_name || !ct)
     return 1;
 
+  if (generic_param_has_conformance(concrete, constraint->protocol_name))
+    return 1;
+
   /* Generic instantiation (e.g. Array<Int>) — check conditional conformance. */
   if (concrete->kind == TY_GENERIC_INST && concrete->generic.base &&
       concrete->generic.base->kind == TY_NAMED &&
@@ -130,11 +146,67 @@ static int check_proto_conformance(const TypeInfo *concrete,
   return ok;
 }
 
+/* 1 if the type tree still contains a generic parameter or associated-type
+ * reference anywhere — i.e. it is not a fully-concrete type. */
+static int type_has_generic_or_assoc(const TypeInfo *t, int depth) {
+  if (!t || depth > 8) return 0;
+  switch (t->kind) {
+  case TY_GENERIC_PARAM:
+  case TY_ASSOC_REF:
+    return 1;
+  case TY_OPTIONAL:
+  case TY_ARRAY:
+  case TY_SET:
+    return type_has_generic_or_assoc(t->inner, depth + 1);
+  case TY_DICT:
+    return type_has_generic_or_assoc(t->dict.key, depth + 1) ||
+           type_has_generic_or_assoc(t->dict.value, depth + 1);
+  case TY_TUPLE:
+    for (size_t i = 0; i < t->tuple.elem_count; i++)
+      if (type_has_generic_or_assoc(t->tuple.elems[i], depth + 1)) return 1;
+    return 0;
+  case TY_FUNC:
+    if (type_has_generic_or_assoc(t->func.ret, depth + 1)) return 1;
+    for (size_t i = 0; i < t->func.param_count; i++)
+      if (type_has_generic_or_assoc(t->func.params[i], depth + 1)) return 1;
+    return 0;
+  case TY_GENERIC_INST:
+    if (type_has_generic_or_assoc(t->generic.base, depth + 1)) return 1;
+    for (uint32_t i = 0; i < t->generic.arg_count; i++)
+      if (type_has_generic_or_assoc(t->generic.args[i], depth + 1)) return 1;
+    return 0;
+  case TY_PROTOCOL_COMPOSITION:
+    for (uint32_t i = 0; i < t->composition.protocol_count; i++)
+      if (type_has_generic_or_assoc(t->composition.protocols[i], depth + 1))
+        return 1;
+    return 0;
+  default:
+    return 0;
+  }
+}
+
 /** @brief Checks TC_SAME_TYPE: concrete == constraint.rhs_type. */
 static int check_same_type(const TypeInfo *concrete,
                            const TypeConstraint *constraint,
                            SemaContext *ctx, const ASTNode *site) {
   if (!constraint->rhs_type) return 1;
+  /* msf has no generic constraint solver.  A same-type constraint whose
+   * operands still contain a generic parameter or associated-type reference
+   * (`where T == U`, `where Element == Void`, `where X.Item == [K: V]`) is
+   * resolved by the caller's inference, which we don't model — checking it here
+   * with strict structural equality yields spurious "expected X == Y".  Defer
+   * (like TC_SAME_TYPE_ASSOC); only flag a violation between two fully-concrete
+   * types. */
+  if (type_has_generic_or_assoc(concrete, 0) ||
+      type_has_generic_or_assoc(constraint->rhs_type, 0))
+    return 1;
+  /* An optional-wrapper-only difference (`Data` vs `Data?`) comes from
+   * associated-type inference noise — the bound side picks up a spurious `?` —
+   * not a genuine same-type violation.  Tolerate it. */
+  const TypeInfo *a = concrete, *b = constraint->rhs_type;
+  if (a && a->kind == TY_OPTIONAL && a->inner) a = a->inner;
+  if (b && b->kind == TY_OPTIONAL && b->inner) b = b->inner;
+  if (type_equal_deep(a, b)) return 1;
   int ok = type_equal_deep(concrete, constraint->rhs_type);
   if (!ok && ctx) {
     char lhs_s[64], rhs_s[64];

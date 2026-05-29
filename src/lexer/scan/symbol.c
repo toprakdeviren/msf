@@ -111,24 +111,30 @@ Token scan_symbol(Lexer *l, const uint8_t *s, uint32_t len, uint8_t c,
    * operator characters. Lets user-defined infix operators like `<+>`, `<->`,
    * or `<*>` be lexed as a single token. The MULTI_OPS pre-match above takes
    * priority so well-known tokens (`==`, `<=`, `&&`, ...) keep their kind.
-   * `<` and `>` are deliberately excluded from continuation in expression
-   * context where ambiguity with comparison + generics would bite, but a
-   * declared custom-op containing them is fine because the parser registers
-   * the symbol and looks up its precedence by full text. */
-  if (tt == TOK_OPERATOR && raw_tt == TT_OPERATOR &&
-      /* Skip greedy extension when the leading byte is `<` or `>` — every
-       * well-known shape (`<<`, `>>`, `<=`, `>=`, `<-`, `->`) lives in
-       * MULTI_OPS and was already tried above. Without this guard, sequences
-       * like `Foo<...>.method` get lexed as one `>.` operator and break
-       * generic-call parsing. */
-      c != '<' && c != '>') {
+   * For `>`, stop before postfix/member punctuation so generic-member syntax
+   * such as `Foo<T>.bar` does not become a synthetic `>.` operator. */
+  if (tt == TOK_OPERATOR && raw_tt == TT_OPERATOR) {
     uint32_t end = l->pos + 1;
+    /* Once the operator contains a char other than '<'/'>', stop before a
+     * following '<' so `func ~=<T>(...)` splits into the `~=` operator and a
+     * `<T>` generic clause (Swift's rule) rather than lexing `~=<` as one
+     * operator. Operators that start with '<' (`<`, `<=`, `<<`, `<~>`) are
+     * unaffected; `|>` and other '>'-bearing operators are unaffected. */
+    int seen_other = (c != '<' && c != '>');
     while (end < len) {
       uint8_t nc = s[end];
       if (LEX_CHAR_TOKEN[nc] != TT_OPERATOR) break;
+      /* A backtick opens an escaped identifier (`Foo.``Type```, `.``Protocol```);
+       * it is never part of an operator.  Without this, `.` absorbed the
+       * backtick into a synthetic `.``` operator and the identifier was lost. */
+      if (nc == '`') break;
+      if ((c == '>' || c == '!' || c == '?') &&
+          (nc == '.' || nc == '!' || nc == '?')) break;
+      if (nc == '<' && seen_other) break;
       /* don't merge into a comment opener (// or block-comment) — higher prio */
       if (nc == '/' && end + 1 < len && (s[end + 1] == '/' || s[end + 1] == '*'))
         break;
+      if (nc != '<' && nc != '>') seen_other = 1;
       end++;
     }
     uint32_t tl = end - l->pos;

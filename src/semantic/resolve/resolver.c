@@ -10,14 +10,56 @@
 TypeInfo *resolve_node_expr(SemaContext *ctx, ASTNode *node);
 TypeInfo *resolve_node_decl(SemaContext *ctx, ASTNode *node);
 
+static int subtree_contains_await(const ASTNode *node) {
+  if (!node)
+    return 0;
+  if (node->kind == AST_AWAIT_EXPR)
+    return 1;
+  for (const ASTNode *c = node->first_child; c; c = c->next_sibling)
+    if (subtree_contains_await(c))
+      return 1;
+  return 0;
+}
+
+static TypeInfo *resolve_node_impl(SemaContext *ctx, ASTNode *node);
+
 TypeInfo *resolve_node(SemaContext *ctx, ASTNode *node) {
   if (!node)
     return NULL;
 
-  /* Don't re-resolve */
-  if (node->type)
+  /* Don't re-resolve nominals that are already resolved, except for protocols
+   * which need to be processed in Pass 2 to set up associated types in scope. */
+  if (node->type && node->kind != AST_PROTOCOL_DECL)
     return node->type;
 
+  /* Whole-module token-soundness invariant: switch ctx->src/tokens to THIS
+   * node's origin file for the duration of its resolution.  Consequence: any
+   * raw `ctx->tokens[X]` / `ctx->src->data + ...` read of `node` or its subtree
+   * is sound (the active stream is node's own).  But a read of a node reached by
+   * LOOKUP — a sibling type's decl, a member, a @resultBuilder type, a protocol
+   * requirement — is NOT covered here; that node may live in a different file,
+   * so such reads must switch to its origin themselves (sema_origin_enter, e.g.
+   * check_actor_isolation_for_member) or carry their own stream (e.g.
+   * BuilderEntry).  Forgetting this is the cross-file out-of-bounds-read bug. */
+  SemaOriginState origin_state;
+  sema_origin_enter(ctx, node, &origin_state);
+
+  /* Recursion guard: a self-referential decl/member/expr chain re-enters
+   * resolve_node before this node's ->type memo is set, which would recurse
+   * until the stack overflows.  Past the bound, stop descending (return an
+   * unresolved NULL) so analysis degrades gracefully instead of crashing. */
+  if (ctx->resolve_depth >= SEMA_RESOLVE_MAX_DEPTH) {
+    sema_origin_leave(ctx, &origin_state);
+    return NULL;
+  }
+  ctx->resolve_depth++;
+  TypeInfo *r = resolve_node_impl(ctx, node);
+  ctx->resolve_depth--;
+  sema_origin_leave(ctx, &origin_state);
+  return r;
+}
+
+static TypeInfo *resolve_node_impl(SemaContext *ctx, ASTNode *node) {
   switch (node->kind) {
 
   /* ── Expression/literal kinds → resolve_node_expr */
@@ -204,6 +246,17 @@ TypeInfo *resolve_node(SemaContext *ctx, ASTNode *node) {
     return NULL;
   }
 
+  case AST_PROTOCOL_REQ: {
+    for (ASTNode *c = node->first_child; c; c = c->next_sibling) {
+      if (c->kind >= AST_TYPE_IDENT &&
+          (c->kind <= AST_TYPE_ANY || c->kind == AST_TYPE_COMPOSITION))
+        resolve_type_annotation(ctx, c);
+      else
+        resolve_node(ctx, c);
+    }
+    return node->type;
+  }
+
   case AST_ARRAY_LITERAL:
   case AST_DICT_LITERAL:
   case AST_IDENT_EXPR:
@@ -225,6 +278,12 @@ TypeInfo *resolve_node(SemaContext *ctx, ASTNode *node) {
   case AST_SUBSCRIPT_DECL:
   case AST_BLOCK:
     return resolve_node_decl(ctx, node);
+
+  /* Typealias RHS is resolved here in Pass 2 (declare_typealias defers it so a
+   * cross-file aliased type resolves against the full module scope), and again
+   * lazily on first reference — resolve_typealias_decl memoizes node->type. */
+  case AST_TYPEALIAS_DECL:
+    return resolve_typealias_decl(ctx, node);
 
   /* ── Expr kinds (binary through subscript) → resolve_node_expr */
   case AST_BINARY_EXPR:
@@ -253,6 +312,9 @@ TypeInfo *resolve_node(SemaContext *ctx, ASTNode *node) {
     TypeInfo *expected = ctx->expected_closure_type;
 
     sema_push_scope(ctx);
+    uint8_t saved_async = ctx->current_function_async;
+    if (subtree_contains_await(node))
+      ctx->current_function_async = 1;
     TypeInfo *last_t = NULL;
     uint32_t param_idx = 0;
     for (ASTNode *c = node->first_child; c; c = c->next_sibling) {
@@ -276,6 +338,7 @@ TypeInfo *resolve_node(SemaContext *ctx, ASTNode *node) {
       }
       last_t = resolve_node(ctx, c);
     }
+    ctx->current_function_async = saved_async;
     sema_pop_scope(ctx);
 
     expected = ctx->expected_closure_type;
@@ -285,8 +348,18 @@ TypeInfo *resolve_node(SemaContext *ctx, ASTNode *node) {
     ti->func.ret = last_t;
     if (expected && expected->kind == TY_FUNC &&
         expected->func.param_count > 0 && expected->func.params) {
-      ti->func.param_count = expected->func.param_count;
-      ti->func.params = expected->func.params;
+      /* Deep-copy the params array. `expected` (the contextual closure type)
+       * also owns this array, and the type arena frees every TY_FUNC's
+       * func.params at teardown — aliasing it here would double-free. */
+      ti->func.params =
+          malloc(expected->func.param_count * sizeof(TypeInfo *));
+      if (ti->func.params) {
+        ti->func.param_count = expected->func.param_count;
+        for (uint32_t pi = 0; pi < expected->func.param_count; pi++)
+          ti->func.params[pi] = expected->func.params[pi];
+      } else {
+        ti->func.param_count = 0;
+      }
     } else {
       ti->func.param_count = 0;
       ti->func.params = NULL;
@@ -477,10 +550,25 @@ TypeInfo *resolve_node(SemaContext *ctx, ASTNode *node) {
       else
         bound_t = init_t; /* non-optional — use as-is */
     }
+    if (!bound_t) {
+      /* Unresolved initializer (e.g. `if let d = img.jpegData(...)` where the
+       * SDK method's return type isn't modeled): bind as UNKNOWN, not Int.  A
+       * concrete wrong type cascades into false "type mismatch: got Int" at
+       * every use of the binding; UNKNOWN is non-NULL (so the binding doesn't
+       * re-resolve into a cycle) and type checks skip it. */
+      bound_t = type_arena_alloc(ctx->type_arena);
+      if (bound_t) bound_t->kind = TY_UNKNOWN;
+    }
     node->type = bound_t;
     /* Register the bound variable in the current scope. */
     if (bname && *bname) {
       SymbolKind sk = node->data.var.is_computed ? SYM_VAR : SYM_LET;
+      /* `guard let self = self` / `if let self` — the self-rebinding idiom.
+       * The rebound `self` is used like the normal instance `self` (a var), not
+       * an assignable let; binding it as SYM_LET made a later `self`-use trip
+       * the "cannot assign to 'let' constant" check (seen in extension methods,
+       * where there's no type-level `self` var to shadow it). */
+      if (strcmp(bname, "self") == 0) sk = SYM_VAR;
       sema_define(ctx, bname, sk, bound_t, node);
     }
     return bound_t;
@@ -525,9 +613,14 @@ TypeInfo *resolve_node(SemaContext *ctx, ASTNode *node) {
       const char *macro_name = tok_intern(ctx, node->data.aux.name_tok);
       if (macro_name) {
         if (strcmp(macro_name, "file") == 0 ||
+            strcmp(macro_name, "fileID") == 0 ||
+            strcmp(macro_name, "filePath") == 0 ||
             strcmp(macro_name, "function") == 0)
           return (node->type = TY_BUILTIN_STRING);
-        if (strcmp(macro_name, "line") == 0)
+        if (strcmp(macro_name, "line") == 0 ||
+            strcmp(macro_name, "column") == 0 ||
+            strcmp(macro_name, "dsohandle") == 0 ||
+            strcmp(macro_name, "isolation") == 0)
           return (node->type = TY_BUILTIN_INT);
       }
     }
@@ -704,9 +797,42 @@ TypeInfo *resolve_node(SemaContext *ctx, ASTNode *node) {
  * ───────────────────────────────────────────────────────
  */
 int sema_analyze(SemaContext *ctx, ASTNode *root) {
-  /* Fallback allocation for tables when the caller bypassed sema_init.
-   * (Tests sometimes construct SemaContext directly.)  These now own
-   * heap-grown buffers, so they MUST be heap-allocated — no statics. */
+  if (!ctx || !root) return -1;
+  /* Single-file analysis is whole-module analysis over one file — there is no
+   * separate single-file pass path. Build a one-element module from the
+   * context's own source/tokens and run the unified pipeline. token_count is
+   * carried through (0 = single-stream, bounds check disabled). */
+  SemaModuleFile f = {
+      .src = ctx->src,
+      .tokens = ctx->tokens,
+      .token_count = ctx->token_count,
+      .root = root,
+  };
+  return sema_analyze_module(ctx, &f, 1);
+}
+
+/* ── Whole-module analysis ───────────────────────────────────────────────────
+ * Same passes as sema_analyze(), driven across several files that share ONE
+ * SemaContext.  Only ctx->src / ctx->tokens (and the per-file tok_idx→name
+ * cache) change between files; the symbol table, type arena, intern pool and
+ * conformance tables persist — so a reference in one file to a type/member
+ * declared in a sibling file resolves by name, with no SDK stubs or text
+ * concatenation. */
+static void sema_switch_file(SemaContext *ctx, const SemaModuleFile *f) {
+  ctx->src = f->src;
+  ctx->tokens = f->tokens;
+  ctx->token_count = f->token_count;
+  ctx->ast_root = f->root;
+  /* Token indices restart per file, so the cached tok_idx→name table is now
+   * stale; clear it (keep the allocation). */
+  if (ctx->tok_cache && ctx->tok_cache_cap)
+    memset(ctx->tok_cache, 0, (size_t)ctx->tok_cache_cap * sizeof(*ctx->tok_cache));
+}
+
+int sema_analyze_module(SemaContext *ctx, const SemaModuleFile *files, size_t nfiles) {
+  if (!ctx || !files || nfiles == 0)
+    return -1;
+
   if (!ctx->conformance_table) {
     ctx->conformance_table = calloc(1, sizeof(ConformanceTable));
     if (ctx->conformance_table)
@@ -718,45 +844,129 @@ int sema_analyze(SemaContext *ctx, ASTNode *root) {
       assoc_type_table_init(ctx->assoc_type_table);
   }
 
-  /* Collect precedence group names so operator decls can reference them */
+  /* Implicitly-imported modules: every Swift file behaves as if it had
+   * `import Swift` (and the concurrency/string-processing overlays).  Their
+   * public types (CChar, OpaquePointer, … beyond the hardcoded builtins) are
+   * supplied by an attached vocabulary, so pull them up front rather than only
+   * on an explicit import. */
+  if (ctx->vocab) {
+    sema_import_module(ctx, "Swift");
+    sema_import_module(ctx, "_Concurrency");
+    sema_import_module(ctx, "_StringProcessing");
+  }
+
+  /* Precedence-group names are module-wide; also record each file's type-decl
+   * origins so cross-file member-index builds use the right tokens. */
   ctx->pg_count = 0;
-  for (ASTNode *c = root->first_child; c; c = c->next_sibling)
-    if (c->kind == AST_PRECEDENCE_GROUP_DECL)
-      sema_add_precedence_group_name(ctx, c);
+  for (size_t f = 0; f < nfiles; f++) {
+    sema_switch_file(ctx, &files[f]);
+    sema_origin_register(ctx, files[f].root, files[f].src, files[f].tokens,
+                         files[f].token_count, files[f].root);
+    for (ASTNode *c = files[f].root->first_child; c; c = c->next_sibling)
+      if (c->kind == AST_PRECEDENCE_GROUP_DECL)
+        sema_add_precedence_group_name(ctx, c);
+  }
 
-  /* Pass 1: forward declarations */
-  for (ASTNode *c = root->first_child; c; c = c->next_sibling)
-    declare_node(ctx, c);
+  /* Pass 1 — forward declarations for ALL files (fills the shared scope). */
+  for (size_t f = 0; f < nfiles; f++) {
+    sema_switch_file(ctx, &files[f]);
+    for (ASTNode *c = files[f].root->first_child; c; c = c->next_sibling)
+      declare_node(ctx, c);
+  }
 
-  /* Pass 2: type resolution */
-  for (ASTNode *c = root->first_child; c; c = c->next_sibling)
-    resolve_node(ctx, c);
+  /* Pass 2 — type resolution for ALL files (cross-file refs resolve here). */
+  for (size_t f = 0; f < nfiles; f++) {
+    sema_switch_file(ctx, &files[f]);
+    for (ASTNode *c = files[f].root->first_child; c; c = c->next_sibling)
+      resolve_node(ctx, c);
+  }
 
-  /* Pass 3 — protocol conformance checking */
-  pass3_check_conformances(ctx, root);
+  /* Whole-module conformance-witness index: gather each type's members across
+   * body + extensions and the inheritance graph, so pass 3 (which runs per
+   * file) can satisfy a requirement from an extension/inherited/default witness
+   * declared in any file. */
+  for (size_t f = 0; f < nfiles; f++) {
+    sema_switch_file(ctx, &files[f]);
+    sema_witness_index_add_root(ctx, files[f].root);
+  }
 
-  /* Pass 3.5 — Sendable inference for value types + check explicit class
-   * conformance. Runs after pass 3 so stored-property TypeInfo is populated
-   * and any user-declared Sendable conformance is already in the table. */
-  infer_and_check_sendable(ctx, root);
-
-  /* Pass 4 — @Sendable closure capture analysis. Walks the resolved tree
-   * and, for every closure annotated `{ @Sendable in ... }`, verifies its
-   * captured values' types are Sendable. Runs after Sendable inference so
-   * user-defined value types are already in the table. */
-  check_sendable_closures(ctx, root);
+  /* Pass 3 — conformance + Sendable for ALL files. */
+  for (size_t f = 0; f < nfiles; f++) {
+    sema_switch_file(ctx, &files[f]);
+    pass3_check_conformances(ctx, files[f].root);
+    infer_and_check_sendable(ctx, files[f].root);
+    check_sendable_closures(ctx, files[f].root);
+  }
 
   return ctx->error_count == 0 ? 0 : 1;
+}
+
+static const TypeInfo *infer_assoc_from_method(SemaContext *ctx,
+                                               const ASTNode *req_method,
+                                               const ASTNode *impl_method,
+                                               const char *assoc_name) {
+  if (!req_method || !impl_method || !assoc_name)
+    return NULL;
+
+  /* Look through parameters */
+  const ASTNode *rp = req_method->first_child;
+  const ASTNode *ip = impl_method->first_child;
+  while (rp || ip) {
+    while (rp && rp->kind != AST_PARAM) rp = rp->next_sibling;
+    while (ip && ip->kind != AST_PARAM) ip = ip->next_sibling;
+    if (!rp || !ip) break;
+
+    const ASTNode *r_ty_n = find_type_child(rp);
+    if (r_ty_n && type_ast_contains_assoc(r_ty_n, ctx, assoc_name)) {
+      const ASTNode *i_ty_n = find_type_child(ip);
+      TypeInfo *i_ty = i_ty_n ? resolve_type_annotation(ctx, (ASTNode *)i_ty_n) : NULL;
+      if (i_ty) {
+        TypeInfo *inferred = infer_concrete_at_assoc(r_ty_n, i_ty, assoc_name, ctx);
+        if (inferred) return inferred;
+      }
+    }
+    rp = rp->next_sibling;
+    ip = ip->next_sibling;
+  }
+
+  /* Look through return type */
+  const ASTNode *r_ret_n = func_decl_return_type_node(req_method);
+  if (r_ret_n && type_ast_contains_assoc(r_ret_n, ctx, assoc_name)) {
+    const ASTNode *i_ret_n = func_decl_return_type_node(impl_method);
+    TypeInfo *i_ret = i_ret_n ? resolve_type_annotation(ctx, (ASTNode *)i_ret_n) : TY_BUILTIN_VOID;
+    TypeInfo *inferred = infer_concrete_at_assoc(r_ret_n, i_ret, assoc_name, ctx);
+    if (inferred) return inferred;
+  }
+
+  return NULL;
 }
 
 /*
  * check_conformance
  * ─────────────────────────────────────────────
  */
+static int check_conformance_impl(const ASTNode *type_decl,
+                                  const ASTNode *proto_decl, SemaContext *ctx,
+                                  const ASTNode *ast_root);
+
 int check_conformance(const ASTNode *type_decl, const ASTNode *proto_decl,
                       SemaContext *ctx, const ASTNode *ast_root) {
   if (!type_decl || !proto_decl || !ctx)
     return 1;
+  /* Guard a protocol-inheritance cycle (`A: B`, `B: A`): the recursion climbs
+   * inherited protocols, which a cycle would make unbounded.  Treat overflow
+   * as "conforms" (1) — the cycle itself is the user's error, not ours. */
+  if (ctx->conformance_depth >= SEMA_CONFORMANCE_MAX_DEPTH)
+    return 1;
+  ctx->conformance_depth++;
+  int ok = check_conformance_impl(type_decl, proto_decl, ctx, ast_root);
+  ctx->conformance_depth--;
+  return ok;
+}
+
+static int check_conformance_impl(const ASTNode *type_decl,
+                                  const ASTNode *proto_decl, SemaContext *ctx,
+                                  const ASTNode *ast_root) {
 
   const ASTNode *type_body = NULL;
   for (const ASTNode *c = type_decl->first_child; c; c = c->next_sibling)
@@ -767,10 +977,13 @@ int check_conformance(const ASTNode *type_decl, const ASTNode *proto_decl,
   if (!type_body)
     return 1;
 
-  const Token *pt = &ctx->tokens[proto_decl->data.var.name_tok];
-  const char *proto_name = sema_intern(ctx, ctx->src->data + pt->pos, pt->len);
-  const Token *tt = &ctx->tokens[type_decl->data.var.name_tok];
-  const char *type_name = sema_intern(ctx, ctx->src->data + tt->pos, tt->len);
+  /* tok_intern bounds-checks against the current file's token_count: in
+   * whole-module mode proto_decl/type_decl may originate from another file's
+   * token stream, where a raw ctx->tokens[...] index runs off the array. */
+  const char *proto_name =
+      tok_intern_at_node(ctx, proto_decl, proto_decl->data.var.name_tok);
+  const char *type_name =
+      tok_intern_at_node(ctx, type_decl, type_decl->data.var.name_tok);
   int all_ok = 1;
 
   /*
@@ -783,8 +996,7 @@ int check_conformance(const ASTNode *type_decl, const ASTNode *proto_decl,
     for (const ASTNode *inh = c->first_child; inh; inh = inh->next_sibling) {
       const char *pname = NULL;
       if (inh->kind == AST_TYPE_IDENT && inh->tok_idx != 0) {
-        const Token *t = &ctx->tokens[inh->tok_idx];
-        pname = sema_intern(ctx, ctx->src->data + t->pos, t->len);
+        pname = tok_intern_at_node(ctx, inh, inh->tok_idx);
       }
       if (!pname)
         continue;
@@ -816,11 +1028,11 @@ int check_conformance(const ASTNode *type_decl, const ASTNode *proto_decl,
        req = req->next_sibling) {
     if (req->kind != AST_PROTOCOL_REQ || req->tok_idx == 0)
       continue;
-    const Token *rt = &ctx->tokens[req->tok_idx];
-    if (rt->len == 0)
+    const char *req_name = tok_intern_at_node(ctx, req, req->tok_idx);
+    if (!req_name || !*req_name)
       continue;
-    const char *req_name = sema_intern(ctx, ctx->src->data + rt->pos, rt->len);
-    if (!strcmp(req_name, "associatedtype") || !strcmp(req_name, "typealias") ||
+    if (protocol_req_is_associated_type(req) ||
+        !strcmp(req_name, "associatedtype") || !strcmp(req_name, "typealias") ||
         !strcmp(req_name, "protocol"))
       continue;
     /* Bug #16: subscript reqs parse but full conformance check requires
@@ -871,14 +1083,11 @@ int check_conformance(const ASTNode *type_decl, const ASTNode *proto_decl,
       }
       const char *iname = NULL;
       if (impl->kind == AST_FUNC_DECL) {
-        const Token *it = &ctx->tokens[impl->data.func.name_tok];
-        iname = sema_intern(ctx, ctx->src->data + it->pos, it->len);
+        iname = tok_intern_at_node(ctx, impl, impl->data.func.name_tok);
       } else if (impl->kind == AST_VAR_DECL || impl->kind == AST_LET_DECL) {
-        const Token *it = &ctx->tokens[impl->data.var.name_tok];
-        iname = sema_intern(ctx, ctx->src->data + it->pos, it->len);
+        iname = tok_intern_at_node(ctx, impl, impl->data.var.name_tok);
       } else if (impl->kind == AST_TYPEALIAS_DECL) {
-        const Token *it = &ctx->tokens[impl->data.var.name_tok];
-        iname = sema_intern(ctx, ctx->src->data + it->pos, it->len);
+        iname = tok_intern_at_node(ctx, impl, impl->data.var.name_tok);
       }
       if (iname && (iname == req_name || strcmp(iname, req_name) == 0)) {
         /* Associated type requirements must be satisfied by a typealias */
@@ -1016,7 +1225,7 @@ int check_conformance(const ASTNode *type_decl, const ASTNode *proto_decl,
       all_ok = 0;
     }
     /*
-     * Associated type inference — infer from property that uses the
+     * Associated type inference — infer from property or method that uses the
      * associated type
      */
     if (!found && find_type_child(req) && strcmp(req_name, "init") != 0 &&
@@ -1025,40 +1234,82 @@ int check_conformance(const ASTNode *type_decl, const ASTNode *proto_decl,
            r2 = r2->next_sibling) {
         if (r2->kind != AST_PROTOCOL_REQ || r2->tok_idx == 0 || r2 == req)
           continue;
-        const Token *r2t = &ctx->tokens[r2->tok_idx];
-        const char *r2_name =
-            sema_intern(ctx, ctx->src->data + r2t->pos, r2t->len);
+        const char *r2_name = tok_intern_at_node(ctx, r2, r2->tok_idx);
         const ASTNode *r2_ty = find_type_child(r2);
-        if (!r2_ty || !type_ast_contains_assoc(r2_ty, ctx, req_name))
-          continue;
-        if (!protocol_req_is_property(r2, r2_name))
-          continue;
-        const ASTNode *impl2 = NULL;
-        for (const ASTNode *i = type_body->first_child; i;
-             i = i->next_sibling) {
-          const char *iname = NULL;
-          if (i->kind == AST_VAR_DECL || i->kind == AST_LET_DECL)
-            iname = sema_intern(
-                ctx, ctx->src->data + ctx->tokens[i->data.var.name_tok].pos,
-                ctx->tokens[i->data.var.name_tok].len);
-          if (iname && iname == r2_name) {
-            impl2 = i;
+        
+        /* If it's a property requirement containing the associated type */
+        if (r2_ty && type_ast_contains_assoc(r2_ty, ctx, req_name) &&
+            protocol_req_is_property(r2, r2_name)) {
+          const ASTNode *impl2 = NULL;
+          for (const ASTNode *i = type_body->first_child; i;
+               i = i->next_sibling) {
+            const char *iname = NULL;
+            if (i->kind == AST_VAR_DECL || i->kind == AST_LET_DECL)
+              iname = tok_intern_at_node(ctx, i, i->data.var.name_tok);
+            if (iname && iname == r2_name) {
+              impl2 = i;
+              break;
+            }
+          }
+          if (!impl2 || !impl2->type)
+            continue;
+          const TypeInfo *concrete =
+              infer_concrete_at_assoc(r2_ty, impl2->type, req_name, ctx);
+          if (concrete) {
+            char buf[128];
+            type_to_string(concrete, buf, sizeof(buf));
+            const char *concrete_interned =
+                sema_intern(ctx, buf, (size_t)strlen(buf));
+            assoc_type_table_add(ctx->assoc_type_table, type_name, proto_name,
+                                 req_name, concrete_interned);
+            found = 1;
             break;
           }
         }
-        if (!impl2 || !impl2->type)
-          continue;
-        const TypeInfo *concrete =
-            infer_concrete_at_assoc(r2_ty, impl2->type, req_name, ctx);
-        if (concrete) {
-          char buf[128];
-          type_to_string(concrete, buf, sizeof(buf));
-          const char *concrete_interned =
-              sema_intern(ctx, buf, (size_t)strlen(buf));
-          assoc_type_table_add(ctx->assoc_type_table, type_name, proto_name,
-                               req_name, concrete_interned);
-          found = 1;
-          break;
+        
+        /* If it's a method requirement and contains the associated type in params or return */
+        if (r2->kind == AST_PROTOCOL_REQ && (r2->modifiers & (1u << 23)) && strcmp(r2_name, "init") != 0) {
+          int has_assoc = 0;
+          for (const ASTNode *rp = r2->first_child; rp; rp = rp->next_sibling) {
+            if (rp->kind == AST_PARAM) {
+              const ASTNode *rp_ty = find_type_child(rp);
+              if (rp_ty && type_ast_contains_assoc(rp_ty, ctx, req_name)) {
+                has_assoc = 1;
+                break;
+              }
+            }
+          }
+          const ASTNode *r_ret_n = func_decl_return_type_node(r2);
+          if (r_ret_n && type_ast_contains_assoc(r_ret_n, ctx, req_name)) {
+            has_assoc = 1;
+          }
+          if (has_assoc) {
+            /* Find matching candidate method implementation */
+            const ASTNode *impl2 = NULL;
+            for (const ASTNode *i = type_body->first_child; i;
+                 i = i->next_sibling) {
+              if (i->kind == AST_FUNC_DECL) {
+                const char *iname = tok_intern_at_node(ctx, i, i->data.func.name_tok);
+                if (iname && strcmp(iname, r2_name) == 0) {
+                  impl2 = i;
+                  break;
+                }
+              }
+            }
+            if (impl2) {
+              const TypeInfo *concrete = infer_assoc_from_method(ctx, r2, impl2, req_name);
+              if (concrete) {
+                char buf[128];
+                type_to_string(concrete, buf, sizeof(buf));
+                const char *concrete_interned =
+                    sema_intern(ctx, buf, (size_t)strlen(buf));
+                assoc_type_table_add(ctx->assoc_type_table, type_name, proto_name,
+                                     req_name, concrete_interned);
+                found = 1;
+                break;
+              }
+            }
+          }
         }
       }
     }
@@ -1083,11 +1334,23 @@ int check_conformance(const ASTNode *type_decl, const ASTNode *proto_decl,
     if (!found && ast_root &&
         protocol_extension_has_default(ctx, ast_root, proto_name, req_name))
       found = 1;
+    /* Whole-module witness: requirement satisfied by an extension of the type,
+     * an inherited (superclass / refined-protocol) member, or a protocol-
+     * extension default declared anywhere in the module. */
+    if (!found && witness_satisfies(ctx, type_name, req_name))
+      found = 1;
+    if (!found) {
+      int has_unresolved_super = (type_decl->kind == AST_CLASS_DECL) &&
+                                 class_has_unresolved_superclass(ctx, type_decl);
+      if (has_unresolved_super) {
+        found = 1;
+      }
+    }
     if (!found) {
       sema_error(
           ctx, (ASTNode *)type_decl,
           "'%s' does not implement requirement '%s' of protocol '%s'",
-          type_name, proto_name, req_name);
+          type_name, req_name, proto_name);
       all_ok = 0;
     }
   }
@@ -1111,9 +1374,7 @@ void pass3_check_conformances(SemaContext *ctx, ASTNode *root) {
       for (const ASTNode *pi = c->first_child; pi; pi = pi->next_sibling) {
         if (pi->tok_idx == 0)
           continue;
-        const Token *ppt = &ctx->tokens[pi->tok_idx];
-        const char *pname =
-            sema_intern(ctx, ctx->src->data + ppt->pos, ppt->len);
+        const char *pname = tok_intern_at_node(ctx, pi, pi->tok_idx);
         const Symbol *ps = sema_lookup(ctx, pname);
         if (!ps || !ps->decl || ps->decl->kind != AST_PROTOCOL_DECL)
           continue;

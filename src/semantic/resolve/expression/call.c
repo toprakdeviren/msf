@@ -7,6 +7,93 @@
 #include "../../private.h"
 #include <limits.h>
 
+static TypeInfo *make_named_foundation_call_type(SemaContext *ctx,
+                                                 const char *name) {
+  TypeInfo *t = type_arena_alloc(ctx->type_arena);
+  if (!t)
+    return TY_BUILTIN_INT;
+  t->kind = TY_NAMED;
+  t->named.name = name;
+  t->named.decl = NULL;
+  return t;
+}
+
+static TypeInfo *make_default_array_call_type(SemaContext *ctx) {
+  TypeInfo *t = type_arena_alloc(ctx->type_arena);
+  if (!t)
+    return TY_BUILTIN_INT;
+  t->kind = TY_ARRAY;
+  t->inner = TY_BUILTIN_INT;
+  return t;
+}
+
+static TypeInfo *make_array_call_type(SemaContext *ctx, TypeInfo *elem) {
+  TypeInfo *t = type_arena_alloc(ctx->type_arena);
+  if (!t)
+    return TY_BUILTIN_INT;
+  t->kind = TY_ARRAY;
+  t->inner = elem ? elem : TY_BUILTIN_INT;
+  return t;
+}
+
+static TypeInfo *make_default_dict_call_type(SemaContext *ctx) {
+  TypeInfo *t = type_arena_alloc(ctx->type_arena);
+  if (!t)
+    return TY_BUILTIN_INT;
+  t->kind = TY_DICT;
+  t->dict.key = TY_BUILTIN_STRING;
+  t->dict.value = TY_BUILTIN_INT;
+  return t;
+}
+
+static TypeInfo *foundation_contextual_result_type(SemaContext *ctx,
+                                                   const ASTNode *node) {
+  const ASTNode *p = node ? node->parent : NULL;
+  if (p && (p->kind == AST_VAR_DECL || p->kind == AST_LET_DECL)) {
+    const ASTNode *init = find_init_child(p);
+    const ASTNode *ann = find_type_child(p);
+    if (init == node && ann)
+      return resolve_type_annotation(ctx, ann);
+  }
+  if (p && p->kind == AST_CAST_EXPR) {
+    const ASTNode *ty = find_type_child(p);
+    if (ty)
+      return resolve_type_annotation(ctx, ty);
+  }
+  return NULL;
+}
+
+static TypeInfo *foundation_unwrap_optional_type(TypeInfo *t) {
+  return (t && t->kind == TY_OPTIONAL && t->inner) ? t->inner : t;
+}
+
+static const char *range_family_type_name(TypeInfo *ty) {
+  if (!ty)
+    return NULL;
+  if (ty->kind == TY_NAMED)
+    return ty->named.name;
+  if (ty->kind == TY_GENERIC_INST && ty->generic.base &&
+      ty->generic.base->kind == TY_NAMED)
+    return ty->generic.base->named.name;
+  return NULL;
+}
+
+static int is_range_family_type(TypeInfo *ty) {
+  const char *name = range_family_type_name(ty);
+  return name &&
+         (strcmp(name, "Range") == 0 ||
+          strcmp(name, "ClosedRange") == 0 ||
+          strcmp(name, "PartialRangeFrom") == 0 ||
+          strcmp(name, "PartialRangeThrough") == 0 ||
+          strcmp(name, "PartialRangeUpTo") == 0 ||
+          strcmp(name, "UnboundedRange") == 0);
+}
+
+static int is_rangeset_type(TypeInfo *ty) {
+  const char *name = range_family_type_name(ty);
+  return name && strcmp(name, "RangeSet") == 0;
+}
+
 /* ── Overload scoring ──────────────────────────────────────────────────────
  * Scores a single (call site, candidate) pair. Lower score = better fit.
  * Returns -1 to mean "this candidate is not a match at all" (eliminated).
@@ -28,29 +115,32 @@
  */
 #define OVERLOAD_NO_MATCH (-1)
 
-/* Returns 1 if the param's element type matches the arg with at most an
- * integer-literal-to-Float/Double widening. Updates *score on match. */
+/* Returns 1 if the param's element type matches the arg with at most a literal
+ * coercion (an integer/float/etc. literal whose ExpressibleBy* protocol the
+ * param type conforms to, e.g. Int literal → CGFloat). Updates *score. */
 static int score_arg_against(SemaContext *ctx, TypeInfo *p_ty,
                              const ASTNode *arg, int *score) {
   TypeInfo *a_ty = arg->type;
-  (void)ctx;
   if (!p_ty || !a_ty) {
     *score += 1;
     return 1;
   }
   if (type_equal(p_ty, a_ty)) return 1;
-  if (arg->kind == AST_INTEGER_LITERAL &&
-      (p_ty == TY_BUILTIN_DOUBLE || p_ty == TY_BUILTIN_FLOAT)) {
+  if (literal_coerces_to(ctx, arg, p_ty)) {
     *score += 1;
     return 1;
   }
   return 0;
 }
 
-static int score_overload_candidate(SemaContext *ctx, const ASTNode *decl,
-                                    ASTNode **args, uint32_t argc) {
-  uint32_t param_count = 0;
-  uint32_t with_default = 0;
+/* Arity compatibility only (param count vs argc, accounting for defaults and
+ * variadics) — ignores argument types. Used by score_overload_candidate and as
+ * a forgiving fallback: when type scoring eliminates every candidate but
+ * exactly one is arity-compatible, that one is picked (mirrors the lenient
+ * single-overload path, so imperfect generic/nominal type scoring — e.g. a
+ * `Range<Int>` arg — doesn't produce a spurious "no matching overload"). */
+static int overload_arity_ok(const ASTNode *decl, uint32_t argc) {
+  uint32_t param_count = 0, with_default = 0;
   int has_variadic = 0;
   for (const ASTNode *p = decl->first_child; p; p = p->next_sibling) {
     if (p->kind != AST_PARAM) continue;
@@ -66,17 +156,26 @@ static int score_overload_candidate(SemaContext *ctx, const ASTNode *decl,
     }
     if (has_default) with_default++;
   }
-  /* Variadic relaxes the upper bound: argc may exceed param_count because
-   * the trailing variadic slot accepts 0..N arguments. */
-  if (!has_variadic && argc > param_count) return OVERLOAD_NO_MATCH;
+  if (!has_variadic && argc > param_count) return 0;
   if (argc + with_default < param_count) {
-    /* Even with a variadic, the non-variadic params must be filled. The
-     * variadic itself contributes one slot to param_count but tolerates
-     * zero arguments, so allow the count to be one short of param_count. */
-    if (!has_variadic ||
-        argc + with_default + 1 < param_count)
-      return OVERLOAD_NO_MATCH;
+    if (!has_variadic || argc + with_default + 1 < param_count) return 0;
   }
+  return 1;
+}
+
+/* A generic function (has `<T>` parameters). The arity fallback only applies to
+ * these — for concrete-typed overloads the scorer is precise, so a type
+ * mismatch (e.g. a variadic called with a wrong element type) is a real
+ * non-match and must NOT be rescued by arity. */
+static int decl_has_generic_params(const ASTNode *decl) {
+  for (const ASTNode *c = decl->first_child; c; c = c->next_sibling)
+    if (c->kind == AST_GENERIC_PARAM) return 1;
+  return 0;
+}
+
+static int score_overload_candidate(SemaContext *ctx, const ASTNode *decl,
+                                    ASTNode **args, uint32_t argc) {
+  if (!overload_arity_ok(decl, argc)) return OVERLOAD_NO_MATCH;
 
   int score = 0;
   uint32_t arg_idx = 0;
@@ -128,9 +227,17 @@ static int score_overload_candidate(SemaContext *ctx, const ASTNode *decl,
   return score;
 }
 
+/* Marker on a CALL_EXPR node: resolution was attempted and failed (no type).
+ * Bit 30 — well clear of the decl MOD_* flags (<= bit 23); call nodes don't
+ * carry declaration modifiers. Lets us memoize an unresolved call without
+ * setting node->type (which must stay NULL to mean "unresolved"). */
+#define MOD_CALL_RESOLVE_FAILED (1u << 30)
+
 TypeInfo *resolve_call_expr(SemaContext *ctx, ASTNode *node) {
   ASTNode *callee = node->first_child;
   int is_delegation = 0;
+  if (node->modifiers & MOD_CALL_RESOLVE_FAILED)
+    return NULL; /* already attempted; do not re-resolve (avoids O(2^n)) */
 
   if (callee && callee->kind == AST_MEMBER_EXPR) {
     ASTNode *base = callee->first_child;
@@ -238,12 +345,15 @@ TypeInfo *resolve_call_expr(SemaContext *ctx, ASTNode *node) {
            a = a->next_sibling)
         args[argc++] = a;
 
+      int scores[16];
       int best_score = INT_MAX;
       int best_count = 0;
       int best_idx = -1;
       for (uint32_t i = 0; i < n; i++) {
-        if (!overloads[i]->decl) continue;
-        int s = score_overload_candidate(ctx, overloads[i]->decl, args, argc);
+        scores[i] = overloads[i]->decl
+                        ? score_overload_candidate(ctx, overloads[i]->decl, args, argc)
+                        : -1;
+        int s = scores[i];
         if (s < 0) continue;
         if (s < best_score) {
           best_score = s;
@@ -253,6 +363,22 @@ TypeInfo *resolve_call_expr(SemaContext *ctx, ASTNode *node) {
           best_count++;
         }
       }
+      /* A tie among candidates with IDENTICAL signatures is not genuine
+       * ambiguity — it's msf's whole-module symbol table pooling the same-named
+       * member from every type (e.g. a protocol method implemented by N types)
+       * or file-private helpers copied across files.  Collapse those to the
+       * first.  A tie among DISTINCT signatures (`h(Float)` vs `h(Double)` both
+       * reachable via literal conversion) IS real ambiguity and is kept. */
+      if (best_count > 1 && best_idx >= 0) {
+        int distinct = 0;
+        for (uint32_t i = 0; i < n && !distinct; i++) {
+          if ((int)i == best_idx || scores[i] != best_score) continue;
+          if (!overloads[i]->type || !overloads[best_idx]->type ||
+              !type_equal(overloads[i]->type, overloads[best_idx]->type))
+            distinct = 1;
+        }
+        if (!distinct) best_count = 1; /* effectively identical → pick first */
+      }
       if (best_count == 1 && best_idx >= 0) {
         callee->type = overloads[best_idx]->type;
         node->data.call.resolved_callee_decl = overloads[best_idx]->decl;
@@ -260,9 +386,33 @@ TypeInfo *resolve_call_expr(SemaContext *ctx, ASTNode *node) {
       } else if (best_count > 1) {
         sema_error(ctx, node, "ambiguous use of '%s'", cname);
       } else {
-        /* No candidate matched — every overload was eliminated. */
-        sema_error(ctx, node, "no matching overload for call to '%s'", cname);
-        callee_t = NULL;
+        /* Type scoring eliminated every candidate. Before erroring, fall back
+         * to arity: if exactly one overload is arity-compatible, pick it. This
+         * resolves generic overloads whose parameter types the scorer can't
+         * precisely match (e.g. `[T]` vs `[Int]`, `Range<Int>` args) the same
+         * forgiving way the single-overload path already behaves. */
+        int arity_idx = -1;
+        for (uint32_t i = 0; i < n && arity_idx < 0; i++) {
+          if (overloads[i]->decl &&
+              decl_has_generic_params(overloads[i]->decl) &&
+              overload_arity_ok(overloads[i]->decl, argc))
+            arity_idx = (int)i; /* first arity-compatible generic overload */
+        }
+        /* Pick the first arity-compatible generic overload even if several match
+         * — msf's whole-module symbol table pools `private`/`fileprivate`
+         * helpers from every file (a common pattern: the same private
+         * `withCString`-style wrapper copied per file), which Swift would scope
+         * to one file.  They're effectively identical, so resolving to one
+         * avoids a spurious "no matching overload"; msf isn't a strict overload
+         * resolver. */
+        if (arity_idx >= 0) {
+          callee->type = overloads[arity_idx]->type;
+          node->data.call.resolved_callee_decl = overloads[arity_idx]->decl;
+          callee_t = overloads[arity_idx]->type;
+        } else {
+          sema_error(ctx, node, "no matching overload for call to '%s'", cname);
+          callee_t = NULL;
+        }
       }
     } else if (n == 1) {
       /* Single overload — score for label/type match; if accepted, hook decl */
@@ -358,6 +508,148 @@ TypeInfo *resolve_call_expr(SemaContext *ctx, ASTNode *node) {
     }
   }
 
+  if (callee && callee->kind == AST_MEMBER_EXPR) {
+    ASTNode *base = callee->first_child;
+    const char *method = callee->data.var.name_tok
+                             ? tok_intern(ctx, callee->data.var.name_tok)
+                             : NULL;
+    if (base && base->kind == AST_MEMBER_EXPR && method) {
+      ASTNode *ud_base = base->first_child;
+      const char *ud_obj = (ud_base && ud_base->kind == AST_IDENT_EXPR)
+                               ? tok_intern(ctx, ud_base->tok_idx)
+                               : NULL;
+      const char *ud_member = base->data.var.name_tok
+                                  ? tok_intern(ctx, base->data.var.name_tok)
+                                  : NULL;
+      if (ud_obj && ud_member && strcmp(ud_obj, "UserDefaults") == 0 &&
+          strcmp(ud_member, "standard") == 0) {
+        TypeInfo *ctx_ty = foundation_contextual_result_type(ctx, node);
+        TypeInfo *unwrapped_ctx_ty = foundation_unwrap_optional_type(ctx_ty);
+        if (strcmp(method, "set") == 0 ||
+            strcmp(method, "removeObject") == 0)
+          return (node->type = TY_BUILTIN_VOID);
+        if (strcmp(method, "object") == 0)
+          return (node->type = unwrapped_ctx_ty ? unwrapped_ctx_ty
+                                                : TY_BUILTIN_STRING);
+        if (strcmp(method, "string") == 0)
+          return (node->type = TY_BUILTIN_STRING);
+        if (strcmp(method, "stringArray") == 0)
+          return (node->type = make_array_call_type(ctx, TY_BUILTIN_STRING));
+        if (strcmp(method, "integer") == 0)
+          return (node->type = TY_BUILTIN_INT);
+        if (strcmp(method, "double") == 0)
+          return (node->type = TY_BUILTIN_DOUBLE);
+        if (strcmp(method, "bool") == 0)
+          return (node->type = TY_BUILTIN_BOOL);
+        if (strcmp(method, "data") == 0)
+          return (node->type = TY_BUILTIN_DATA);
+        if (strcmp(method, "date") == 0)
+          return (node->type = make_named_foundation_call_type(ctx, "Date"));
+        if (strcmp(method, "array") == 0) {
+          if (unwrapped_ctx_ty && unwrapped_ctx_ty->kind == TY_ARRAY)
+            return (node->type = unwrapped_ctx_ty);
+          return (node->type = make_default_array_call_type(ctx));
+        }
+        if (strcmp(method, "dictionary") == 0) {
+          if (unwrapped_ctx_ty && unwrapped_ctx_ty->kind == TY_DICT)
+            return (node->type = unwrapped_ctx_ty);
+          return (node->type = make_default_dict_call_type(ctx));
+        }
+      }
+      if (ud_obj && ud_member && strcmp(ud_obj, "FileManager") == 0 &&
+          strcmp(ud_member, "default") == 0) {
+        if (strcmp(method, "fileExists") == 0)
+          return (node->type = TY_BUILTIN_BOOL);
+        if (strcmp(method, "contentsOfDirectory") == 0)
+          return (node->type = make_array_call_type(ctx, TY_BUILTIN_STRING));
+        if (strcmp(method, "createDirectory") == 0 ||
+            strcmp(method, "removeItem") == 0)
+          return (node->type = TY_BUILTIN_VOID);
+      }
+    }
+    if (base && method) {
+      TypeInfo *base_type = resolve_node(ctx, base);
+      if (base_type && base_type->kind == TY_OPTIONAL && base_type->inner)
+        base_type = base_type->inner;
+      if (base_type && base_type->kind == TY_NAMED && base_type->named.name &&
+          strcmp(base_type->named.name, "FileManager") == 0) {
+        if (strcmp(method, "fileExists") == 0)
+          return (node->type = TY_BUILTIN_BOOL);
+        if (strcmp(method, "contentsOfDirectory") == 0)
+          return (node->type = make_array_call_type(ctx, TY_BUILTIN_STRING));
+        if (strcmp(method, "createDirectory") == 0 ||
+            strcmp(method, "removeItem") == 0)
+          return (node->type = TY_BUILTIN_VOID);
+      }
+      if (base_type && type_kind_of(base_type) == TY_DATA &&
+          strcmp(method, "write") == 0)
+        return (node->type = TY_BUILTIN_VOID);
+      if (base_type && base_type->kind == TY_NAMED && base_type->named.name &&
+          strcmp(base_type->named.name, "Data") == 0 &&
+          strcmp(method, "write") == 0)
+        return (node->type = TY_BUILTIN_VOID);
+      if (base_type && base_type->kind == TY_NAMED && base_type->named.name &&
+          strcmp(base_type->named.name, "FileHandle") == 0) {
+        if (strcmp(method, "readDataToEndOfFile") == 0 ||
+            strcmp(method, "readToEnd") == 0)
+          return (node->type = TY_BUILTIN_DATA);
+        if (strcmp(method, "seekToEndOfFile") == 0 ||
+            strcmp(method, "seekToEnd") == 0)
+          return (node->type = TY_BUILTIN_INT);
+        if (strcmp(method, "write") == 0 ||
+            strcmp(method, "closeFile") == 0 ||
+            strcmp(method, "close") == 0)
+          return (node->type = TY_BUILTIN_VOID);
+      }
+      if (base_type && base_type->kind == TY_NAMED && base_type->named.name &&
+          strcmp(base_type->named.name, "Bundle") == 0) {
+        if (strcmp(method, "path") == 0 ||
+            strcmp(method, "url") == 0 ||
+            strcmp(method, "localizedString") == 0)
+          return (node->type = TY_BUILTIN_STRING);
+      }
+      if (base_type && base_type->kind == TY_NAMED && base_type->named.name &&
+          strcmp(base_type->named.name, "URLRequest") == 0) {
+        if (strcmp(method, "setValue") == 0 ||
+            strcmp(method, "addValue") == 0)
+          return (node->type = TY_BUILTIN_VOID);
+        if (strcmp(method, "value") == 0)
+          return (node->type = TY_BUILTIN_STRING);
+      }
+      if (base_type && base_type->kind == TY_NAMED && base_type->named.name &&
+          strcmp(base_type->named.name, "HTTPURLResponse") == 0) {
+        if (strcmp(method, "value") == 0 ||
+            strcmp(method, "localizedString") == 0)
+          return (node->type = TY_BUILTIN_STRING);
+      }
+    }
+    if (base && base->kind == AST_IDENT_EXPR && method) {
+      const char *root = tok_intern(ctx, base->tok_idx);
+      if (root && strcmp(root, "PropertyListSerialization") == 0) {
+        if (strcmp(method, "data") == 0 ||
+            strcmp(method, "dataFromPropertyList") == 0)
+          return (node->type = TY_BUILTIN_DATA);
+        if (strcmp(method, "propertyList") == 0 ||
+            strcmp(method, "propertyListFromData") == 0) {
+          TypeInfo *ctx_ty = foundation_contextual_result_type(ctx, node);
+          ctx_ty = foundation_unwrap_optional_type(ctx_ty);
+          return (node->type = ctx_ty ? ctx_ty : make_default_dict_call_type(ctx));
+        }
+      }
+      if (root && strcmp(root, "Locale") == 0) {
+        if (strcmp(method, "canonicalIdentifier") == 0 ||
+            strcmp(method, "canonicalLanguageIdentifier") == 0) {
+          return (node->type = TY_BUILTIN_STRING);
+        }
+      }
+      if (root && (strncmp(root, "Unit", 4) == 0 || strcmp(root, "Dimension") == 0)) {
+        if (strcmp(method, "baseUnit") == 0) {
+          return (node->type = make_named_foundation_call_type(ctx, root));
+        }
+      }
+    }
+  }
+
   if (callee_t && callee_t->kind == TY_FUNC) {
     TypeInfo *ret = callee_t->func.ret ? callee_t->func.ret : TY_BUILTIN_VOID;
     int via_opt_chain =
@@ -382,12 +674,80 @@ TypeInfo *resolve_call_expr(SemaContext *ctx, ASTNode *node) {
       return (node->type = dump_t ? dump_t : TY_BUILTIN_VOID);
     }
     if (strcmp(cname, "Mirror") == 0) {
+      TypeInfo *base_t = type_arena_alloc(ctx->type_arena);
+      base_t->kind = TY_NAMED;
+      base_t->named.name = cname;
+      base_t->named.decl = NULL;
+
+      ASTNode *arg = callee->next_sibling;
+      TypeInfo *subject_t = arg ? arg->type : TY_BUILTIN_VOID;
+      if (!subject_t && arg) {
+        subject_t = resolve_node(ctx, arg);
+      }
+      if (!subject_t) subject_t = TY_BUILTIN_VOID;
+
       TypeInfo *mirror_t = type_arena_alloc(ctx->type_arena);
-      mirror_t->kind = TY_NAMED;
-      mirror_t->named.name = cname;
-      mirror_t->named.decl = NULL;
+      mirror_t->kind = TY_GENERIC_INST;
+      mirror_t->generic.base = base_t;
+      mirror_t->generic.arg_count = 1;
+      mirror_t->generic.args = malloc(sizeof(TypeInfo *));
+      mirror_t->generic.args[0] = subject_t;
+
       return (node->type = mirror_t);
     }
+    if (strcmp(cname, "IndexPath") == 0)
+      return (node->type = make_named_foundation_call_type(ctx, "IndexPath"));
+    if (strcmp(cname, "IndexSet") == 0)
+      return (node->type = make_named_foundation_call_type(ctx, "IndexSet"));
+    if (strcmp(cname, "DateInterval") == 0)
+      return (node->type = make_named_foundation_call_type(ctx, "DateInterval"));
+    if (strcmp(cname, "TimeZone") == 0)
+      return (node->type = make_named_foundation_call_type(ctx, "TimeZone"));
+    if (strcmp(cname, "Locale") == 0)
+      return (node->type = make_named_foundation_call_type(ctx, "Locale"));
+    if (strcmp(cname, "Decimal") == 0) {
+      TypeInfo *base_t = make_named_foundation_call_type(ctx, "Decimal");
+      const ASTNode *arg0 = callee->next_sibling;
+      if (arg0 && arg0->arg_label_tok &&
+          strcmp(tok_intern(ctx, arg0->arg_label_tok), "string") == 0) {
+        return (node->type = wrap_optional_result(base_t, 1, ctx));
+      }
+      return (node->type = base_t);
+    }
+    if (strcmp(cname, "NumberFormatter") == 0)
+      return (node->type = make_named_foundation_call_type(ctx, "NumberFormatter"));
+    if (strcmp(cname, "Bundle") == 0)
+      return (node->type = make_named_foundation_call_type(ctx, "Bundle"));
+    if (strcmp(cname, "CachedURLResponse") == 0)
+      return (node->type = make_named_foundation_call_type(ctx, "CachedURLResponse"));
+    if (strcmp(cname, "FileHandle") == 0)
+      return (node->type = make_named_foundation_call_type(ctx, "FileHandle"));
+    if (strcmp(cname, "URLResponse") == 0)
+      return (node->type = make_named_foundation_call_type(ctx, "URLResponse"));
+    if (strcmp(cname, "HTTPURLResponse") == 0)
+      return (node->type = make_named_foundation_call_type(ctx, "HTTPURLResponse"));
+    if (strcmp(cname, "URLRequest") == 0)
+      return (node->type = make_named_foundation_call_type(ctx, "URLRequest"));
+    if (strcmp(cname, "DateFormatter") == 0)
+      return (node->type = make_named_foundation_call_type(ctx, "DateFormatter"));
+    if (strcmp(cname, "ISO8601DateFormatter") == 0)
+      return (node->type = make_named_foundation_call_type(ctx, "ISO8601DateFormatter"));
+    if (strcmp(cname, "Measurement") == 0)
+      return (node->type = make_named_foundation_call_type(ctx, "Measurement"));
+    if (strcmp(cname, "MeasurementFormatter") == 0)
+      return (node->type = make_named_foundation_call_type(ctx, "MeasurementFormatter"));
+    if (strcmp(cname, "UnitConverter") == 0)
+      return (node->type = make_named_foundation_call_type(ctx, "UnitConverter"));
+    if (strcmp(cname, "UnitConverterLinear") == 0)
+      return (node->type = make_named_foundation_call_type(ctx, "UnitConverterLinear"));
+    if (strcmp(cname, "CLLocationCoordinate2D") == 0)
+      return (node->type = make_named_foundation_call_type(ctx, "CLLocationCoordinate2D"));
+    if (strcmp(cname, "CLLocation") == 0)
+      return (node->type = make_named_foundation_call_type(ctx, "CLLocation"));
+    if (strcmp(cname, "CLLocationManager") == 0)
+      return (node->type = make_named_foundation_call_type(ctx, "CLLocationManager"));
+    if (strncmp(cname, "Unit", 4) == 0 || strcmp(cname, "Dimension") == 0)
+      return (node->type = make_named_foundation_call_type(ctx, cname));
     if (strcmp(cname, SW_TYPE_BOOL) == 0) {
       ASTNode *arg0 = callee->next_sibling;
       const TypeInfo *arg_t = arg0 ? arg0->type : NULL;
@@ -403,6 +763,8 @@ TypeInfo *resolve_call_expr(SemaContext *ctx, ASTNode *node) {
       return (node->type = TY_BUILTIN_JSONDECODER);
     if (strcmp(cname, "JSONEncoder") == 0)
       return (node->type = TY_BUILTIN_JSONENCODER);
+    if (strcmp(cname, "PropertyListSerialization") == 0)
+      return (node->type = make_named_foundation_call_type(ctx, "PropertyListSerialization"));
     TypeInfo *conv_ty = resolve_builtin(cname);
     if (conv_ty &&
         (is_integer_kind(conv_ty->kind) || is_float_kind(conv_ty->kind))) {
@@ -450,6 +812,16 @@ TypeInfo *resolve_call_expr(SemaContext *ctx, ASTNode *node) {
           sema_error(ctx, node, "no matching initializer for argument count %u",
                      (unsigned)argc);
       }
+      /* An enum's `init?(rawValue:)` is the RawRepresentable FAILABLE
+       * initializer — `T(rawValue: x)` returns `T?` (so `… ?? default` is
+       * valid).  Restrict to enums: an OptionSet/struct `init(rawValue:)` is
+       * NOT failable (returns `Self`), so wrapping it would wrongly flag a
+       * non-optional assignment. */
+      ASTNode *a0 = callee->next_sibling;
+      if (sym->kind == SYM_ENUM && a0 && a0->arg_label_tok &&
+          strcmp(tok_intern(ctx, a0->arg_label_tok), "rawValue") == 0 &&
+          !a0->next_sibling)
+        return (node->type = wrap_optional_result(sym->type, 1, ctx));
       return (node->type = sym->type);
     }
   }
@@ -509,6 +881,183 @@ TypeInfo *resolve_call_expr(SemaContext *ctx, ASTNode *node) {
         }
         if (base_t->kind == TY_JSONENCODER && strcmp(mname, "encode") == 0) {
           return (node->type = TY_BUILTIN_STRING);
+        }
+        TypeInfo *unwrapped_base = base_t;
+        if (unwrapped_base->kind == TY_OPTIONAL && unwrapped_base->inner)
+          unwrapped_base = unwrapped_base->inner;
+        if (unwrapped_base->kind == TY_NAMED && unwrapped_base->named.name &&
+            strcmp(unwrapped_base->named.name, "URLComponents") == 0 &&
+            strcmp(mname, "url") == 0) {
+          return (node->type = TY_BUILTIN_STRING);
+        }
+        if (strcmp(mname, "formatted") == 0 ||
+            strcmp(mname, "ISO8601Format") == 0) {
+          TypeKind bk = type_kind_of(unwrapped_base);
+          if (bk == TY_DOUBLE || bk == TY_FLOAT ||
+              (unwrapped_base->kind == TY_NAMED &&
+               unwrapped_base->named.name &&
+               strcmp(unwrapped_base->named.name, "Date") == 0))
+            return (node->type = TY_BUILTIN_STRING);
+        }
+        if (unwrapped_base->kind == TY_NAMED && unwrapped_base->named.name &&
+            strcmp(unwrapped_base->named.name, "DateInterval") == 0) {
+          if (strcmp(mname, "contains") == 0 ||
+              strcmp(mname, "intersects") == 0)
+            return (node->type = TY_BUILTIN_BOOL);
+          if (strcmp(mname, "intersection") == 0)
+            return (node->type = unwrapped_base);
+        }
+        if (is_range_family_type(unwrapped_base) &&
+            (strcmp(mname, "contains") == 0 ||
+             strcmp(mname, "overlaps") == 0)) {
+          return (node->type = TY_BUILTIN_BOOL);
+        }
+        if (is_range_family_type(unwrapped_base) &&
+            strcmp(mname, "relative") == 0) {
+          return (node->type = make_named_foundation_call_type(ctx, "Range"));
+        }
+        if (range_family_type_name(unwrapped_base) &&
+            strcmp(range_family_type_name(unwrapped_base),
+                   "PartialRangeFrom") == 0 &&
+            strcmp(mname, "makeIterator") == 0) {
+          return (node->type = make_named_foundation_call_type(
+                      ctx, "PartialRangeFrom.Iterator"));
+        }
+        if (range_family_type_name(unwrapped_base) &&
+            strcmp(range_family_type_name(unwrapped_base),
+                   "PartialRangeFrom") == 0 &&
+            strcmp(mname, "prefix") == 0) {
+          return (node->type = make_default_array_call_type(ctx));
+        }
+        if (range_family_type_name(unwrapped_base) &&
+            strcmp(range_family_type_name(unwrapped_base),
+                   "PartialRangeFrom") == 0 &&
+            strcmp(mname, "dropFirst") == 0) {
+          return (node->type = unwrapped_base);
+        }
+        if (range_family_type_name(unwrapped_base) &&
+            strcmp(range_family_type_name(unwrapped_base),
+                   "PartialRangeFrom.Iterator") == 0 &&
+            strcmp(mname, "next") == 0) {
+          return (node->type = wrap_optional_result(TY_BUILTIN_INT, 1, ctx));
+        }
+        if (is_rangeset_type(unwrapped_base)) {
+          if (strcmp(mname, "contains") == 0 ||
+              strcmp(mname, "isSubset") == 0 ||
+              strcmp(mname, "isSuperset") == 0 ||
+              strcmp(mname, "isStrictSubset") == 0 ||
+              strcmp(mname, "isStrictSuperset") == 0 ||
+              strcmp(mname, "isDisjoint") == 0)
+            return (node->type = TY_BUILTIN_BOOL);
+          if (strcmp(mname, "insert") == 0 ||
+              strcmp(mname, "remove") == 0 ||
+              strcmp(mname, "formUnion") == 0 ||
+              strcmp(mname, "formIntersection") == 0 ||
+              strcmp(mname, "formSymmetricDifference") == 0 ||
+              strcmp(mname, "subtract") == 0)
+            return (node->type = TY_BUILTIN_VOID);
+          if (strcmp(mname, "union") == 0 ||
+              strcmp(mname, "intersection") == 0 ||
+              strcmp(mname, "subtracting") == 0 ||
+              strcmp(mname, "symmetricDifference") == 0)
+            return (node->type = unwrapped_base);
+        }
+        if (unwrapped_base->kind == TY_NAMED && unwrapped_base->named.name &&
+            strcmp(unwrapped_base->named.name, "CharacterSet") == 0) {
+          if (strcmp(mname, "union") == 0 ||
+              strcmp(mname, "intersection") == 0 ||
+              strcmp(mname, "subtracting") == 0 ||
+              strcmp(mname, "symmetricDifference") == 0)
+            return (node->type = unwrapped_base);
+          if (strcmp(mname, "isSuperset") == 0)
+            return (node->type = TY_BUILTIN_BOOL);
+          if (strcmp(mname, "formUnion") == 0 ||
+              strcmp(mname, "formIntersection") == 0 ||
+              strcmp(mname, "subtract") == 0 ||
+              strcmp(mname, "formSymmetricDifference") == 0)
+            return (node->type = TY_BUILTIN_VOID);
+        }
+        if (unwrapped_base->kind == TY_NAMED && unwrapped_base->named.name &&
+            strcmp(unwrapped_base->named.name, "TimeZone") == 0) {
+          if (strcmp(mname, "secondsFromGMT") == 0)
+            return (node->type = TY_BUILTIN_INT);
+          if (strcmp(mname, "abbreviation") == 0 ||
+              strcmp(mname, "localizedName") == 0)
+            return (node->type = TY_BUILTIN_STRING);
+          if (strcmp(mname, "isDaylightSavingTime") == 0)
+            return (node->type = TY_BUILTIN_BOOL);
+          if (strcmp(mname, "daylightSavingTimeOffset") == 0)
+            return (node->type = TY_BUILTIN_DOUBLE);
+        }
+        if (unwrapped_base->kind == TY_NAMED && unwrapped_base->named.name &&
+            strcmp(unwrapped_base->named.name, "Locale") == 0) {
+          if (strncmp(mname, "localizedString", 15) == 0)
+            return (node->type = wrap_optional_result(TY_BUILTIN_STRING, 1, ctx));
+        }
+        if (unwrapped_base->kind == TY_NAMED && unwrapped_base->named.name &&
+            strcmp(unwrapped_base->named.name, "NumberFormatter") == 0) {
+          if (strcmp(mname, "string") == 0 ||
+              strcmp(mname, "stringForObjectValue") == 0)
+            return (node->type = TY_BUILTIN_STRING);
+        }
+        if (unwrapped_base->kind == TY_NAMED && unwrapped_base->named.name &&
+            strcmp(unwrapped_base->named.name, "DateFormatter") == 0) {
+          if (strcmp(mname, "string") == 0 ||
+              strcmp(mname, "localizedString") == 0)
+            return (node->type = TY_BUILTIN_STRING);
+          if (strcmp(mname, "date") == 0)
+            return (node->type = TY_BUILTIN_DOUBLE);
+          if (strcmp(mname, "setLocalizedDateFormatFromTemplate") == 0)
+            return (node->type = TY_BUILTIN_VOID);
+        }
+        if (unwrapped_base->kind == TY_NAMED && unwrapped_base->named.name &&
+            strcmp(unwrapped_base->named.name, "ISO8601DateFormatter") == 0) {
+          if (strcmp(mname, "string") == 0)
+            return (node->type = TY_BUILTIN_STRING);
+          if (strcmp(mname, "date") == 0)
+            return (node->type = TY_BUILTIN_DOUBLE);
+        }
+        if (unwrapped_base->kind == TY_NAMED && unwrapped_base->named.name &&
+            strcmp(unwrapped_base->named.name, "Measurement") == 0) {
+          if (strcmp(mname, "converted") == 0)
+            return (node->type = unwrapped_base);
+        }
+        if (unwrapped_base->kind == TY_NAMED && unwrapped_base->named.name &&
+            strcmp(unwrapped_base->named.name, "MeasurementFormatter") == 0) {
+          if (strcmp(mname, "string") == 0)
+            return (node->type = TY_BUILTIN_STRING);
+        }
+        if (unwrapped_base->kind == TY_NAMED && unwrapped_base->named.name &&
+            strcmp(unwrapped_base->named.name, "HTTPURLResponse") == 0) {
+          if (strcmp(mname, "value") == 0 ||
+              strcmp(mname, "localizedString") == 0)
+            return (node->type = TY_BUILTIN_STRING);
+        }
+        if (unwrapped_base->kind == TY_NAMED && unwrapped_base->named.name &&
+            (strcmp(unwrapped_base->named.name, "UnitConverter") == 0 ||
+             strcmp(unwrapped_base->named.name, "UnitConverterLinear") == 0)) {
+          if (strcmp(mname, "baseUnitValue") == 0 ||
+              strcmp(mname, "value") == 0)
+            return (node->type = TY_BUILTIN_DOUBLE);
+        }
+        if (unwrapped_base->kind == TY_NAMED && unwrapped_base->named.name &&
+            strcmp(unwrapped_base->named.name, "IndexPath") == 0) {
+          if (strcmp(mname, "append") == 0)
+            return (node->type = TY_BUILTIN_VOID);
+          if (strcmp(mname, "appending") == 0 ||
+              strcmp(mname, "dropLast") == 0 ||
+              strcmp(mname, "removingLastIndex") == 0)
+            return (node->type = unwrapped_base);
+          if (strcmp(mname, "index") == 0)
+            return (node->type = TY_BUILTIN_INT);
+        }
+        if (unwrapped_base->kind == TY_NAMED && unwrapped_base->named.name &&
+            strcmp(unwrapped_base->named.name, "IndexSet") == 0) {
+          if (strcmp(mname, "contains") == 0)
+            return (node->type = TY_BUILTIN_BOOL);
+          if (strcmp(mname, "insert") == 0 ||
+              strcmp(mname, "remove") == 0)
+            return (node->type = TY_BUILTIN_VOID);
         }
 
         TypeInfo *bm = lookup_builtin_member(ctx, base_t, mname);
@@ -578,5 +1127,13 @@ TypeInfo *resolve_call_expr(SemaContext *ctx, ASTNode *node) {
     }
   }
 
+  /* Unresolvable call: memoize the failure so the node is not re-resolved on
+   * every visit. node->type stays NULL (callers rely on that to mean
+   * "unresolved"), so we mark the call node itself. Without this, nested
+   * unresolvable calls — a chain of methods returning a self-referential
+   * associated type, `s.e().e()...` with `associatedtype E: Gen` — re-resolve
+   * their base AND callee at each level (both leave node->type NULL), giving
+   * O(2^depth) work and a frontend hang on deep chains. */
+  node->modifiers |= MOD_CALL_RESOLVE_FAILED;
   return NULL;
 }

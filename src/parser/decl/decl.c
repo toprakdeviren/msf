@@ -64,7 +64,29 @@ ASTNode *parse_block(Parser *p) {
  * Import & Typealias
  * ═════════════════════════════════════════════════════════════════════════════ */
 
-/** @brief Parses: import Module.Sub.Path */
+static int is_import_kind(Parser *p) {
+  if (p_is_eof(p))
+    return 0;
+  if (p_tok(p)->type == TOK_KEYWORD) {
+    switch (p_tok(p)->keyword) {
+      case KW_TYPEALIAS:
+      case KW_STRUCT:
+      case KW_CLASS:
+      case KW_ENUM:
+      case KW_PROTOCOL:
+      case KW_LET:
+      case KW_VAR:
+      case KW_FUNC:
+      case KW_OPERATOR:
+        return 1;
+      default:
+        return 0;
+    }
+  }
+  return tok_text_eq(p, "operator", 8);
+}
+
+/** @brief Parses: import [kind] Module.Sub.Path */
 ASTNode *parse_import_decl(Parser *p) {
   adv(p);
   ASTNode *node = alloc_node(p, AST_IMPORT_DECL);
@@ -74,6 +96,8 @@ ASTNode *parse_import_decl(Parser *p) {
     node->modifiers |= MOD_TESTABLE_IMPORT;
     p->import_is_testable = 0;
   }
+  if (is_import_kind(p))
+    adv(p);
   node->data.var.name_tok = (uint32_t)p->pos;
   while (p_tok(p)->type == TOK_IDENTIFIER || p_tok(p)->type == TOK_KEYWORD) {
     adv(p);
@@ -102,6 +126,11 @@ ASTNode *parse_typealias(Parser *p, uint32_t mods) {
     ASTNode *rhs = parse_type(p);
     if (rhs)
       ast_add_child(node, rhs);
+  }
+  if (p_is_kw(p, KW_WHERE)) {
+    ASTNode *wc = parse_where_clause(p);
+    if (wc)
+      ast_add_child(node, wc);
   }
   node->tok_end = (uint32_t)p->pos;
   return node;
@@ -154,18 +183,45 @@ static void parse_assoc_values(Parser *p, ASTNode *elem) {
     }
     ASTNode *ty = parse_type(p);
     if (ty) ast_add_child(param, ty);
+    /* Associated values can carry a default in synthesized interfaces:
+     * `case hourly(during: DateInterval = DateInterval(...))`.  Consume `= expr`,
+     * balance-skipping any remainder (multiline calls) to the next ','/')'. */
+    if (!p_is_eof(p) && p->src->data[p_tok(p)->pos] == '=' && p_tok(p)->len == 1) {
+      adv(p);
+      ASTNode *def = parse_expr_pratt(p, 0);
+      if (def) ast_add_child(param, def);
+      int d = 0;
+      while (!p_is_eof(p)) {
+        char ch = p->src->data[p_tok(p)->pos];
+        if (d == 0 && (ch == ',' || ch == ')')) break;
+        if (ch == '(' || ch == '[' || ch == '{') d++;
+        else if (ch == ')' || ch == ']' || ch == '}') d--;
+        adv(p);
+      }
+    }
     ast_add_child(elem, param);
     if (P_COMMA(p)) adv(p);
   }
   if (P_RPAREN(p)) adv(p);
 }
 
-/** @brief Parses one enum case element: name[(assoc)] [= raw_value]. */
+/** @brief True if the current token can name an enum case.
+ *
+ * Besides plain identifiers, Swift's declaration-modifier keywords are
+ * contextual and may be used bare as case names (`case open`, `case final`,
+ * `case `static``...).  They tokenize as hard keywords, but after `case` there
+ * is no modifier position, so accepting them here is unambiguous. */
+static int token_can_name_enum_case(const Parser *p) {
+  /* An identifier, or any keyword used as a case name (`case actor`, `case open`,
+   * `case `default``).  After `case` the next token is always the element name. */
+  return p_tok(p)->type == TOK_IDENTIFIER || p_tok(p)->type == TOK_KEYWORD;
+}
+
 static ASTNode *parse_enum_element(Parser *p) {
   ASTNode *elem = alloc_node(p, AST_ENUM_ELEMENT_DECL);
   if (!elem) return NULL;
   elem->data.var.name_tok = (uint32_t)p->pos;
-  if (p_tok(p)->type == TOK_IDENTIFIER) adv(p);
+  if (token_can_name_enum_case(p)) adv(p);
 
   if (P_LPAREN(p))
     parse_assoc_values(p, elem);
@@ -198,13 +254,23 @@ void parse_enum_body(Parser *p, ASTNode *parent) {
   while (!p_is_eof(p) && !P_RBRACE(p)) {
     size_t before = p->pos;
 
-    uint32_t case_mods = 0;
+    /* A case may carry leading attributes (`@available(...) case x`, common in
+     * real code and ubiquitous in .swiftinterface) and the `indirect` modifier.
+     * Parse that prefix; if `case` follows it is a case (attach the
+     * attributes).  Otherwise rewind and let parse_decl_stmt handle the member
+     * (methods / nested types / computed vars parse their own attributes). */
+    uint32_t extra_mods = 0;
+    ASTNode *attr_tail = NULL;
+    ASTNode *attr_head = parse_attribute_chain(p, &extra_mods, &attr_tail);
+
+    uint32_t case_mods = extra_mods;
     if (p_is_ident_str(p, CK_INDIRECT)) { case_mods |= MOD_INDIRECT; adv(p); }
 
     if (p_is_kw(p, KW_CASE)) {
       ASTNode *case_decl = alloc_node(p, AST_ENUM_CASE_DECL);
       if (!case_decl) return;
       case_decl->modifiers = case_mods;
+      if (attr_head) attach_attribute_chain(case_decl, attr_head);
       adv(p);
       do {
         ASTNode *elem = parse_enum_element(p);
@@ -212,6 +278,7 @@ void parse_enum_body(Parser *p, ASTNode *parent) {
       } while (P_COMMA(p) && (adv(p), 1));
       ast_add_child(body, case_decl);
     } else {
+      p->pos = before;  /* rewind; parse_decl_stmt re-parses any attributes */
       add_stmt_chain(p, body, parse_decl_stmt(p));
     }
 
@@ -250,8 +317,41 @@ ASTNode *parse_nominal(Parser *p, ASTNodeKind kind, uint32_t mods) {
   if (p_tok(p)->type == TOK_IDENTIFIER)
     adv(p);
 
-  if (!p_is_eof(p) && cur_char(p) == '<')
+  if (kind == AST_EXTENSION_DECL) {
+    /* Extension targets are types, not generic parameter declarations:
+     * `extension Foo<T>.Bar: P where ... {}`.  The semantic model stores the
+     * leading name token today, so consume the qualified suffix for parser
+     * recovery and leave richer target typing to a later AST shape. */
+    while (!p_is_eof(p)) {
+      if (cur_char(p) == '<') {
+        int depth = 0;
+        do {
+          if (cur_char(p) == '<') depth++;
+          else if (cur_char(p) == '>') depth--;
+          adv(p);
+        } while (!p_is_eof(p) && depth > 0);
+        continue;
+      }
+      int is_dot = p_is_punct(p, '.') ||
+                   (p_tok(p)->type == TOK_OPERATOR && p_tok(p)->len == 1 &&
+                    p->src->data[p_tok(p)->pos] == '.');
+      if (!is_dot)
+        break;
+      adv(p);
+      if (p_tok(p)->type == TOK_IDENTIFIER || p_tok(p)->type == TOK_KEYWORD) {
+        /* The extended type is the LAST component of a qualified path:
+         * `extension Dispatch.DispatchQueue` extends DispatchQueue, not the
+         * `Dispatch` module qualifier.  Track the last identifier so name_tok
+         * names the actual type (correct for sema's extension→type matching
+         * and for vocabulary extraction). */
+        node->data.var.name_tok = (uint32_t)p->pos;
+        adv(p);
+      } else
+        break;
+    }
+  } else if (!p_is_eof(p) && cur_char(p) == '<') {
     parse_generic_params(p, node);
+  }
 
   if (P_COLON(p)) {
     ASTNode *conf = parse_inheritance_clause(p);

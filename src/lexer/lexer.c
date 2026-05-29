@@ -127,7 +127,35 @@ Token lexer_next(Lexer *lexer) {
     }
     lexer->col += tl; lexer->pos += tl;
     Keyword kw = map_kw_id(kw_id);
-    return (Token){kw ? TOK_KEYWORD : TOK_IDENTIFIER, sp, tl, sl, sc, kw, OP_NONE, 0};
+    /* Contextual keywords: keywords only in specific positions, valid
+     * identifiers everywhere else. Lex them as identifiers but keep the keyword
+     * id so the relevant parser can still recognize them.
+     *   - prefix/postfix/infix: keywords only before `operator`
+     *     (try_parse_fixity_decl), e.g. `var prefix: Character?`.
+     *   - some/any: keywords only at the start of a type (parse_type checks the
+     *     preserved keyword id); valid names elsewhere — `case any`,
+     *     `static let any`, `let some = …`. */
+    int kw_is_contextual =
+        (kw == KW_PREFIX || kw == KW_POSTFIX || kw == KW_INFIX ||
+         kw == KW_SOME || kw == KW_ANY);
+    TokenType tt = (kw && !kw_is_contextual) ? TOK_KEYWORD : TOK_IDENTIFIER;
+    return (Token){tt, sp, tl, sl, sc, kw, OP_NONE, 0};
+  }
+
+  /* Escaped identifier: `default`, `class`, etc.  Store the logical token
+   * range without the backticks so downstream name lookup sees the identifier
+   * text, not the escape delimiters. */
+  if (c == '`') {
+    uint32_t end = lexer->pos + 1;
+    while (end < len && s[end] != '`' && !IS_NEWLINE(s[end]))
+      end++;
+    if (end < len && s[end] == '`' && end > lexer->pos + 1) {
+      uint32_t inner_len = end - lexer->pos - 1;
+      lexer->pos = end + 1;
+      lexer->col += inner_len + 2;
+      return (Token){TOK_IDENTIFIER, sp + 1, inner_len, sl, sc + 1,
+                     KW_NONE, OP_NONE, 0};
+    }
   }
 
   /* Number */

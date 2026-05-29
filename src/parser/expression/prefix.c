@@ -5,6 +5,10 @@
  */
 #include "../private.h"
 
+#define RANGE_EXPR_PREFIX (1u << 16)
+#define RANGE_EXPR_UNBOUNDED (1u << 18)
+#define PREC_ABOVE_RANGE 136
+
 /* ═══════════════════════════════════════════════════════════════════════════════
  * Helpers
  * ═══════════════════════════════════════════════════════════════════════════════ */
@@ -20,6 +24,22 @@ static int p_is_dot(const Parser *p) {
 static int p_is_hash(const Parser *p) {
   const Token *t = p_tok(p);
   return t->type == TOK_OPERATOR && t->len == 1 && p->src->data[t->pos] == '#';
+}
+
+static int p_is_range_op(const Parser *p) {
+  return p_is_op(p, OP_RANGE_INCL) || p_is_op(p, OP_RANGE_EXCL);
+}
+
+static int p_range_bound_is_missing(const Parser *p) {
+  const Token *t = p_tok(p);
+  if (t->type == TOK_EOF || t->has_leading_newline)
+    return 1;
+  if (t->type == TOK_PUNCT) {
+    char c = p->src->data[t->pos];
+    return c == ')' || c == ']' || c == '}' || c == ',' || c == ';' ||
+           c == ':';
+  }
+  return 0;
 }
 
 /** @brief Allocates an IDENT_EXPR, consumes one token, and wraps in postfix. */
@@ -111,6 +131,35 @@ static ASTNode *parse_prefix_unary(Parser *p) {
     }
   }
   return NULL;
+}
+
+/** @brief Parses prefix partial range values: ...hi and ..<hi. */
+static ASTNode *parse_prefix_partial_range(Parser *p) {
+  if (!p_is_range_op(p))
+    return NULL;
+
+  ASTNode *node = alloc_node(p, AST_BINARY_EXPR);
+  if (!node)
+    return NULL;
+  node->data.binary.op_tok = (uint32_t)p->pos;
+  node->modifiers |= RANGE_EXPR_PREFIX;
+  int can_be_unbounded = p_is_op(p, OP_RANGE_INCL);
+  adv(p);
+
+  ASTNode *bound = NULL;
+  if (!p_range_bound_is_missing(p))
+    bound = parse_expr_pratt(p, PREC_ABOVE_RANGE);
+  if (bound) {
+    ast_add_child(node, bound);
+  } else if (can_be_unbounded && p_range_bound_is_missing(p)) {
+    node->modifiers |= RANGE_EXPR_UNBOUNDED;
+  } else {
+    parse_error_push(p, "%s:%u:%u: expected upper bound after range operator",
+                     p->src->filename, p_tok(p)->line, p_tok(p)->col);
+  }
+
+  node->tok_end = (uint32_t)p->pos;
+  return parse_postfix(p, node);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════════
@@ -223,8 +272,14 @@ static ASTNode *parse_key_path(Parser *p) {
 
   /* \.property — inferred root type */
   if (!p_is_dot(p)) {
-    ASTNode *type_node = parse_type(p);
-    if (type_node) ast_add_child(kp, type_node);
+    ASTNode *type_node = alloc_node(p, AST_TYPE_IDENT);
+    if (type_node) {
+      type_node->tok_idx = (uint32_t)p->pos;
+      if (p_tok(p)->type == TOK_IDENTIFIER || p_tok(p)->type == TOK_KEYWORD)
+        adv(p);
+      type_node->tok_end = (uint32_t)p->pos;
+      ast_add_child(kp, type_node);
+    }
   }
   if (!p_is_eof(p) && p_is_dot(p)) {
     adv(p);
@@ -314,6 +369,7 @@ static ASTNode *parse_implicit_member(Parser *p) {
 static ASTNode *parse_prefix_special(Parser *p) {
   /* self, super, identifiers */
   if (p_is_kw(p, KW_SELF) || p_is_kw(p, KW_SUPER) ||
+      p_is_kw(p, KW_PACKAGE) ||
       p_tok(p)->type == TOK_IDENTIFIER)
     return parse_ident_postfix(p);
 
@@ -419,6 +475,7 @@ ASTNode *parse_prefix(Parser *p) {
   ASTNode *node = NULL;
 
   if ((node = parse_prefix_keyword(p))) return node;
+  if ((node = parse_prefix_partial_range(p))) return node;
   if ((node = parse_prefix_unary(p))) return node;
   if ((node = parse_prefix_literal(p))) return node;
   if ((node = parse_prefix_special(p))) return node;

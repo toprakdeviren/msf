@@ -237,6 +237,8 @@ Prec get_infix_prec(Parser *p) {
       return (Prec){110, 111};
     case OP_LSHIFT:
     case OP_RSHIFT:
+    case OP_MASK_SHL:   /* &<< — masking shift, same precedence as << */
+    case OP_MASK_SHR:   /* &>> */
       return (Prec){157, 158};
     case OP_WRAP_ADD:
     case OP_WRAP_SUB:
@@ -251,6 +253,13 @@ Prec get_infix_prec(Parser *p) {
     case OP_AND_ASSIGN:
     case OP_OR_ASSIGN:
     case OP_XOR_ASSIGN:
+    case OP_SHL_ASSIGN:      /* <<=  */
+    case OP_SHR_ASSIGN:      /* >>=  */
+    case OP_WRAP_ADD_ASSIGN: /* &+=  */
+    case OP_WRAP_SUB_ASSIGN: /* &-=  */
+    case OP_WRAP_MUL_ASSIGN: /* &*=  */
+    case OP_MASK_SHL_ASSIGN: /* &<<= */
+    case OP_MASK_SHR_ASSIGN: /* &>>= */
       return (Prec){90, 89}; /* right-assoc assignment */
     case OP_ARROW:
       return (Prec){-1, -1}; /* not an infix op (type syntax only) */
@@ -301,11 +310,26 @@ ASTNode *parse_prefix(Parser *p);
 ASTNode *parse_postfix(Parser *p, ASTNode *lhs);
 ASTNode *parse_closure_body(Parser *p);
 
+/** @brief True if the cursor sits on an argument label (`identifier :`). */
+static int at_arg_label(const Parser *p) {
+  return (p_tok(p)->type == TOK_IDENTIFIER || p_tok(p)->type == TOK_KEYWORD) &&
+         p->pos + 1 < p->ts->count &&
+         p->ts->tokens[p->pos + 1].type == TOK_PUNCT &&
+         p->src->data[p->ts->tokens[p->pos + 1].pos] == ':';
+}
+
 /**
  * @brief Parses a comma-separated argument list: (label: expr, expr, ...).
  *
  * Detects optional argument labels (identifier followed by ':') and stores
  * them in arg_label_tok.  Stops at @p end_char without consuming it.
+ *
+ * Also accepts compound-name references where the parentheses hold argument
+ * labels with NO values — `String.init(cString:)`, `foo(_:)`, `f(a:b:)`,
+ * `#selector(setter:)`.  Without this, a label followed immediately by the
+ * terminator left no expression for parse_expr_pratt, and the progress guard
+ * consumed the closing `)` itself — turning the rest of the file into one
+ * runaway argument list.
  */
 void parse_arg_list(Parser *p, ASTNode *parent, char end_char) {
   while (!p_is_eof(p) && !p_is_punct(p, end_char)) {
@@ -313,15 +337,29 @@ void parse_arg_list(Parser *p, ASTNode *parent, char end_char) {
     uint32_t label_tok = 0;
     int has_label = 0;
     /* Detect optional label: `separator: " "` */
-    if ((p_tok(p)->type == TOK_IDENTIFIER || p_tok(p)->type == TOK_KEYWORD) &&
-        p->pos + 1 < p->ts->count &&
-        p->ts->tokens[p->pos + 1].type == TOK_PUNCT &&
-        p->src->data[p->ts->tokens[p->pos + 1].pos] == ':') {
+    if (at_arg_label(p)) {
       label_tok = (uint32_t)p->pos;
       has_label = 1;
       adv(p); /* label */
       adv(p); /* ':' */
       before = p->pos;
+    }
+    /* A label with no value (`label:` then terminator, comma, or the next
+     * label) is a compound-name component, not a call argument.  Record the
+     * label and move on rather than parsing — and crucially without eating the
+     * terminator. */
+    if (has_label &&
+        (p_is_punct(p, end_char) || P_COMMA(p) || at_arg_label(p))) {
+      ASTNode *ref = alloc_node(p, AST_IDENT_EXPR);
+      if (ref) {
+        ref->tok_idx = label_tok;
+        ref->tok_end = label_tok + 1;
+        ref->arg_label_tok = label_tok;
+        ast_add_child(parent, ref);
+      }
+      if (P_COMMA(p))
+        adv(p);
+      continue;
     }
     ASTNode *e = parse_expr_pratt(p, 0);
     if (e) {

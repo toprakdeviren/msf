@@ -48,9 +48,13 @@ ASTNode *parse_func_decl(Parser *p, uint32_t mods) {
     return NULL;
   node->modifiers = mods;
 
-  /* 1. Name (identifier or operator) */
+  /* 1. Name (identifier, operator, or a keyword used as a name).
+   * Swift permits many keywords in declaration-name position — `func open`,
+   * `func print`, `func repeat` — where the lexer classified the name as a
+   * keyword.  Accept TOK_KEYWORD here so such members parse. */
   node->data.func.name_tok = (uint32_t)p->pos;
-  if (p_tok(p)->type == TOK_IDENTIFIER || p_tok(p)->type == TOK_OPERATOR)
+  if (p_tok(p)->type == TOK_IDENTIFIER || p_tok(p)->type == TOK_OPERATOR ||
+      p_tok(p)->type == TOK_KEYWORD)
     adv(p);
 
   /* 2. Generic parameters: <T, U: Proto> */
@@ -105,6 +109,67 @@ ASTNode *parse_func_decl(Parser *p, uint32_t mods) {
 }
 
 /**
+ * @brief Parses a macro declaration (Swift 5.9):
+ * @code
+ *   macro Name<T>(params) -> ResultType = definition where T: P
+ * @endcode
+ *
+ * `macro` is contextual (lexed as an identifier).  The shape mirrors a function
+ * declaration but has no `{ body }`; instead an optional `= expansion`
+ * definition (`#externalMacro(...)` or `Builtin.X`) followed by an optional
+ * where clause.  Caller has confirmed the cursor sits on `macro <name>`.
+ *
+ * @param p     Parser state (pos at the contextual `macro` identifier).
+ * @param mods  Modifier bitmask from collect_modifiers().
+ * @return      AST_MACRO_DECL node (name in data.func.name_tok).
+ */
+ASTNode *parse_macro_decl(Parser *p, uint32_t mods) {
+  adv(p); /* `macro` (contextual identifier) */
+  ASTNode *node = alloc_node(p, AST_MACRO_DECL);
+  if (!node)
+    return NULL;
+  node->modifiers = mods;
+
+  /* 1. Name */
+  node->data.func.name_tok = (uint32_t)p->pos;
+  if (p_tok(p)->type == TOK_IDENTIFIER)
+    adv(p);
+
+  /* 2. Generic parameters: <T, U: Proto> */
+  if (!p_is_eof(p) && cur_char(p) == '<')
+    parse_generic_params(p, node);
+
+  /* 3. Parameter list */
+  parse_params(p, node);
+
+  /* 4. Return type: -> Type */
+  if (p_is_op(p, OP_ARROW)) {
+    adv(p);
+    ASTNode *ret = parse_type(p);
+    if (ret)
+      ast_add_child(node, ret);
+  }
+
+  /* 5. Definition: `= #externalMacro(...)` or `= Builtin.X` */
+  if (!p_is_eof(p) && p_tok(p)->len == 1 &&
+      p->src->data[p_tok(p)->pos] == '=') {
+    adv(p);
+    ASTNode *def = parse_expr_pratt(p, 0);
+    if (def)
+      ast_add_child(node, def);
+  }
+
+  /* 6. where clause: where T: ExpressibleByStringLiteral */
+  if (p_is_kw(p, KW_WHERE)) {
+    ASTNode *wc = parse_where_clause(p);
+    if (wc)
+      ast_add_child(node, wc);
+  }
+  node->tok_end = (uint32_t)p->pos;
+  return node;
+}
+
+/**
  * @brief Parses a subscript declaration.
  *
  * Full syntax:
@@ -150,6 +215,15 @@ ASTNode *parse_subscript_decl(Parser *p, uint32_t mods) {
     ASTNode *ret = parse_type(p);
     if (ret)
       ast_add_child(node, ret);
+  }
+
+  /* 3b. where clause: subscript<T>(t: T.Type) -> T.Value
+   *     where T : UITraitDefinition, T.Value.RawValue == CGFloat
+   * (func and init parse this too; subscript was missing it.) */
+  if (p_is_kw(p, KW_WHERE)) {
+    ASTNode *wc = parse_where_clause(p);
+    if (wc)
+      ast_add_child(node, wc);
   }
 
   /* 4. Body: accessor block or shorthand getter */
@@ -240,7 +314,14 @@ ASTNode *parse_init_decl(Parser *p, uint32_t mods) {
     ast_add_child(node, throws_clause);
   }
 
-  /* 6. Body */
+  /* 6. where clause: init<S>(_ value: S) where S.Element == Element */
+  if (p_is_kw(p, KW_WHERE)) {
+    ASTNode *wc = parse_where_clause(p);
+    if (wc)
+      ast_add_child(node, wc);
+  }
+
+  /* 7. Body */
   if (P_LBRACE(p)) {
     ASTNode *body = parse_block(p);
     ast_add_child(node, body);

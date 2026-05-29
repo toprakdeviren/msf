@@ -8,23 +8,65 @@
 /*
  */
 
+static int node_is_within_decl(const ASTNode *node, const ASTNode *decl) {
+  for (const ASTNode *p = node; p; p = p->parent)
+    if (p == decl)
+      return 1;
+  return 0;
+}
+
+static const char *dispatch_named_family_name(TypeInfo *ty) {
+  if (!ty)
+    return NULL;
+  if (ty->kind == TY_NAMED)
+    return ty->named.name;
+  if (ty->kind == TY_GENERIC_INST && ty->generic.base &&
+      ty->generic.base->kind == TY_NAMED)
+    return ty->generic.base->named.name;
+  return NULL;
+}
+
+static int dispatch_type_is_range_family(TypeInfo *ty) {
+  const char *name = dispatch_named_family_name(ty);
+  return name &&
+         (strcmp(name, "Range") == 0 ||
+          strcmp(name, "ClosedRange") == 0 ||
+          strcmp(name, "PartialRangeFrom") == 0 ||
+          strcmp(name, "PartialRangeThrough") == 0 ||
+          strcmp(name, "PartialRangeUpTo") == 0 ||
+          strcmp(name, "UnboundedRange") == 0);
+}
+
 /* ─── Expression case dispatcher (called from resolve_node) ─── */
 TypeInfo *resolve_node_expr(SemaContext *ctx, ASTNode *node) {
+  /* Consume any contextual type set by a set-site (var/let init).  It governs
+   * only THIS node — clear it up front so it can't leak into nested
+   * sub-expressions (e.g. operands of a binary `+`). */
+  TypeInfo *want = ctx->expected_type;
+  ctx->expected_type = NULL;
+
   switch (node->kind) {
   case AST_INTEGER_LITERAL:
+    /* A literal adopts the contextual type when that type can be built from it
+     * (ExpressibleByIntegerLiteral); otherwise it defaults to Int. */
+    if (want && literal_coerces_to(ctx, node, want)) return (node->type = want);
     return (node->type = TY_BUILTIN_INT);
   case AST_FLOAT_LITERAL:
+    if (want && literal_coerces_to(ctx, node, want)) return (node->type = want);
     return (node->type = TY_BUILTIN_DOUBLE);
   case AST_STRING_LITERAL:
     resolve_children(ctx, node);
+    if (want && literal_coerces_to(ctx, node, want)) return (node->type = want);
     return (node->type = TY_BUILTIN_STRING);
   case AST_REGEX_LITERAL:
     resolve_children(ctx, node);
     return (node->type =
                 TY_BUILTIN_STRING); /* pattern as String until Regex type */
   case AST_BOOL_LITERAL:
+    if (want && literal_coerces_to(ctx, node, want)) return (node->type = want);
     return (node->type = TY_BUILTIN_BOOL);
   case AST_NIL_LITERAL:
+    if (want && want->kind == TY_OPTIONAL) return (node->type = want);
     return NULL;
   case AST_ARRAY_LITERAL: {
     TypeInfo *elem_t = NULL;
@@ -93,10 +135,14 @@ TypeInfo *resolve_node_expr(SemaContext *ctx, ASTNode *node) {
       return (node->type = bi);
     Symbol *sym = sema_lookup(ctx, iname);
     if (sym) {
+      if (!sym->type && sym->decl && sym->decl->kind == AST_PARAM) {
+        sym->type = TY_BUILTIN_INT;
+        sym->decl->type = sym->type;
+      }
       if (!sym->type && sym->decl) {
         if (sym->is_resolving) {
-          /* Circular reference: let x = x */
-          sema_error(ctx, node, "circular reference in declaration of '%s'", iname);
+          if (node_is_within_decl(node, sym->decl))
+            sema_error(ctx, node, "circular reference in declaration of '%s'", iname);
           return (node->type = TY_BUILTIN_INT); /* break cycle with fallback type */
         }
         sym->is_resolving = 1;
@@ -303,6 +349,11 @@ TypeInfo *resolve_node_expr(SemaContext *ctx, ASTNode *node) {
     if (lt && rt && !type_equal(lt, rt) && lt->kind != TY_UNKNOWN &&
         rt->kind != TY_UNKNOWN && lt->kind != TY_PROTOCOL_COMPOSITION &&
         lt->kind != TY_TUPLE && rt->kind != TY_TUPLE &&
+        !int_literal_adapts(lhs, lt, rhs, rt) &&
+        !literal_coerces_to(ctx, rhs, lt) &&
+        !func_to_func_assign(lt, rt) &&
+        !assign_target_is_any(lt) &&
+        !subtype_assignable(ctx, lt, rt) &&
         !(lt->kind == TY_OPTIONAL && lt->inner &&
           type_equal(lt->inner, rt))) {
       int is_empty_collection_literal = 0;
@@ -320,7 +371,7 @@ TypeInfo *resolve_node_expr(SemaContext *ctx, ASTNode *node) {
         char lt_s[64], rt_s[64];
         type_to_string(lt, lt_s, sizeof(lt_s));
         type_to_string(rt, rt_s, sizeof(rt_s));
-        if (is_int_float_mix(lt, rt)) {
+        if (is_int_float_mix(lt, rt) && !int_literal_adapts(lhs, lt, rhs, rt)) {
           sema_error(ctx, rhs,
                      "Cannot assign value of type '%s' to type '%s'; "
                      "use explicit conversion",
@@ -360,6 +411,15 @@ TypeInfo *resolve_node_expr(SemaContext *ctx, ASTNode *node) {
       if (ctx_type && ctx_type->kind == TY_OPTIONAL && ctx_type->inner)
         ctx_type = ctx_type->inner;
       root_type = ctx_type;
+    }
+    if (root_type && root_type->kind == TY_GENERIC_INST && root_type->generic.base &&
+        root_type->generic.base->kind == TY_NAMED && root_type->generic.base->named.name &&
+        (strcmp(root_type->generic.base->named.name, "KeyPath") == 0 ||
+         strcmp(root_type->generic.base->named.name, "WritableKeyPath") == 0 ||
+         strcmp(root_type->generic.base->named.name, "ReferenceWritableKeyPath") == 0 ||
+         strcmp(root_type->generic.base->named.name, "PartialKeyPath") == 0) &&
+        root_type->generic.arg_count >= 1) {
+      root_type = root_type->generic.args[0];
     }
     TypeInfo *value_type = NULL;
     if (root_type && prop_name) {
@@ -500,6 +560,8 @@ TypeInfo *resolve_node_expr(SemaContext *ctx, ASTNode *node) {
                           : NULL;
     if (op && op->len == 2 && memcmp(ctx->src->data + op->pos, "is", 2) == 0)
       return (node->type = TY_BUILTIN_BOOL);
+    if (node->modifiers & MOD_WEAK)
+      return (node->type = wrap_optional_result(cast_t, 1, ctx));
     return (node->type = cast_t);
   }
   case AST_TERNARY_EXPR: {
@@ -514,18 +576,30 @@ TypeInfo *resolve_node_expr(SemaContext *ctx, ASTNode *node) {
   case AST_SUBSCRIPT_EXPR: {
     ASTNode *base = node->first_child;
     TypeInfo *base_t = resolve_node(ctx, base);
-    if (base && base->next_sibling)
-      resolve_node(ctx, base->next_sibling);
+    ASTNode *index = base ? base->next_sibling : NULL;
+    TypeInfo *index_t = index ? resolve_node(ctx, index) : NULL;
     TypeInfo *unwrapped = base_t;
     if (base_t && base_t->kind == TY_OPTIONAL)
       unwrapped = base_t->inner;
     int base_is_opt_chain = (base && base->kind == AST_OPTIONAL_CHAIN);
     int base_is_dict = (unwrapped && unwrapped->kind == TY_DICT);
     TypeInfo *elem_t = NULL;
+    if (unwrapped && unwrapped->kind == TY_ARRAY &&
+        dispatch_type_is_range_family(index_t))
+      return (node->type = unwrapped);
+    if (unwrapped && (type_kind_of(unwrapped) == TY_STRING ||
+                      type_kind_of(unwrapped) == TY_SUBSTRING) &&
+        dispatch_type_is_range_family(index_t))
+      return (node->type = TY_BUILTIN_SUBSTRING);
     if (unwrapped && unwrapped->kind == TY_ARRAY)
       elem_t = unwrapped->inner;
     else if (base_is_dict)
       elem_t = unwrapped->dict.value;
+    else if (unwrapped && unwrapped->kind == TY_NAMED &&
+             unwrapped->named.name &&
+             (strcmp(unwrapped->named.name, "IndexPath") == 0 ||
+              strcmp(unwrapped->named.name, "IndexSet") == 0))
+      elem_t = TY_BUILTIN_INT;
     else if (unwrapped && unwrapped->kind == TY_NAMED &&
              unwrapped->named.decl) {
       const ASTNode *tdecl = unwrapped->named.decl;

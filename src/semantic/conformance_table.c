@@ -17,6 +17,111 @@
  * Conformance Table
  * ═══════════════════════════════════════════════════════════════════════════════ */
 
+/* ── (type,protocol) → entry hash index ──────────────────────────────────
+ * conformance_table_has()/_get_where() are called once per type per
+ * conformance check; a linear strcmp scan made that O(count) each, i.e.
+ * O(n^2) on files with thousands of conformances.  This open-addressed index
+ * maps the (type_name, protocol_name) pair to the *index* of its first
+ * matching entry (indices stay valid across entries[] realloc).  Built
+ * incrementally by conformance_table_add(); strcmp still confirms a hit, so
+ * correctness does not depend on the names being interned. */
+#define CONF_EMPTY 0xFFFFFFFFu
+
+typedef struct { uint32_t hash; uint32_t entry; } ConfSlot;
+typedef struct { ConfSlot *slots; uint32_t cap; uint32_t used; } ConfIndex;
+
+static uint32_t conf_pair_hash(const char *t, const char *p) {
+  uint32_t h = 2166136261u;                      /* FNV-1a over type, then proto */
+  for (; *t; t++) { h ^= (unsigned char)*t; h *= 16777619u; }
+  h ^= 0x9e3779b9u;
+  for (; *p; p++) { h ^= (unsigned char)*p; h *= 16777619u; }
+  return h;
+}
+
+static void conf_index_insert_raw(ConfIndex *ix, uint32_t hash, uint32_t entry) {
+  uint32_t i = hash & (ix->cap - 1);
+  while (ix->slots[i].entry != CONF_EMPTY) i = (i + 1) & (ix->cap - 1);
+  ix->slots[i].hash = hash;
+  ix->slots[i].entry = entry;
+  ix->used++;
+}
+
+/* Append entry @p e to the index, keeping the lowest entry index per pair so
+ * get_where() still returns the first matching record (matching the original
+ * declaration-order scan). */
+static void conf_index_put(ConformanceTable *ct, uint32_t e) {
+  const char *t = ct->entries[e].type_name, *p = ct->entries[e].protocol_name;
+  if (!t || !p) return;
+  ConfIndex *ix = ct->index;
+  if (!ix) {
+    ix = calloc(1, sizeof(*ix));
+    if (!ix) return;
+    ix->cap = 64;
+    ix->slots = malloc(ix->cap * sizeof(ConfSlot));
+    if (!ix->slots) { free(ix); return; }
+    for (uint32_t i = 0; i < ix->cap; i++) ix->slots[i].entry = CONF_EMPTY;
+    ct->index = ix;
+  }
+  if ((ix->used + 1) * 4 >= ix->cap * 3) {        /* grow at 0.75 load */
+    uint32_t ncap = ix->cap * 2;
+    ConfSlot *ns = malloc(ncap * sizeof(ConfSlot));
+    if (!ns) return;
+    for (uint32_t i = 0; i < ncap; i++) ns[i].entry = CONF_EMPTY;
+    ConfSlot *old = ix->slots; uint32_t oldcap = ix->cap;
+    ix->slots = ns; ix->cap = ncap; ix->used = 0;
+    for (uint32_t i = 0; i < oldcap; i++)
+      if (old[i].entry != CONF_EMPTY)
+        conf_index_insert_raw(ix, old[i].hash, old[i].entry);
+    free(old);
+  }
+  uint32_t h = conf_pair_hash(t, p);
+  /* dedup: keep the first (lowest-index) record for this pair */
+  for (uint32_t i = h & (ix->cap - 1); ix->slots[i].entry != CONF_EMPTY;
+       i = (i + 1) & (ix->cap - 1)) {
+    if (ix->slots[i].hash == h) {
+      uint32_t o = ix->slots[i].entry;
+      if (strcmp(ct->entries[o].type_name, t) == 0 &&
+          strcmp(ct->entries[o].protocol_name, p) == 0)
+        return;                                   /* already present */
+    }
+  }
+  conf_index_insert_raw(ix, h, e);
+}
+
+/* Returns the first entry index matching (type,protocol), or CONF_EMPTY. */
+static uint32_t conf_index_lookup(const ConformanceTable *ct, const char *t,
+                                  const char *p) {
+  const ConfIndex *ix = ct->index;
+  if (!ix || !ix->cap) return CONF_EMPTY;
+  uint32_t h = conf_pair_hash(t, p);
+  for (uint32_t i = h & (ix->cap - 1); ix->slots[i].entry != CONF_EMPTY;
+       i = (i + 1) & (ix->cap - 1)) {
+    if (ix->slots[i].hash == h) {
+      uint32_t e = ix->slots[i].entry;
+      if (strcmp(ct->entries[e].type_name, t) == 0 &&
+          strcmp(ct->entries[e].protocol_name, p) == 0)
+        return e;
+    }
+  }
+  return CONF_EMPTY;
+}
+
+/* Empties the index (keeps the allocation) — used when the table is reset. */
+static void conf_index_reset(ConformanceTable *ct) {
+  ConfIndex *ix = ct->index;
+  if (!ix) return;
+  for (uint32_t i = 0; i < ix->cap; i++) ix->slots[i].entry = CONF_EMPTY;
+  ix->used = 0;
+}
+
+void conformance_index_free(ConformanceTable *ct) {
+  if (!ct || !ct->index) return;
+  ConfIndex *ix = ct->index;
+  free(ix->slots);
+  free(ix);
+  ct->index = NULL;
+}
+
 /** @brief Grows the entries array geometrically.  Returns 0 on success, -1 OOM. */
 static int conformance_table_grow(ConformanceTable *ct) {
   uint32_t new_cap = ct->capacity ? ct->capacity * 2 : CONFORMANCE_TABLE_INIT_CAP;
@@ -35,6 +140,7 @@ void conformance_table_add(ConformanceTable *ct, const char *type_name,
   ct->entries[ct->count].type_name = type_name;
   ct->entries[ct->count].protocol_name = protocol_name;
   ct->entries[ct->count].where_ast = NULL;
+  conf_index_put(ct, ct->count);
   ct->count++;
 }
 
@@ -48,6 +154,7 @@ void conformance_table_add_conditional(ConformanceTable *ct,
   ct->entries[ct->count].type_name = type_name;
   ct->entries[ct->count].protocol_name = protocol_name;
   ct->entries[ct->count].where_ast = where_ast;
+  conf_index_put(ct, ct->count);
   ct->count++;
 }
 
@@ -57,6 +164,10 @@ const void *conformance_table_get_where(const ConformanceTable *ct,
                                         const char *protocol_name) {
   if (!ct || !type_name || !protocol_name)
     return NULL;
+  if (ct->index) {
+    uint32_t e = conf_index_lookup(ct, type_name, protocol_name);
+    return e == CONF_EMPTY ? NULL : ct->entries[e].where_ast;
+  }
   for (uint32_t i = 0; i < ct->count; i++) {
     if (ct->entries[i].type_name && ct->entries[i].protocol_name &&
         strcmp(ct->entries[i].type_name, type_name) == 0 &&
@@ -71,6 +182,8 @@ int conformance_table_has(const ConformanceTable *ct, const char *type_name,
                           const char *protocol_name) {
   if (!ct || !type_name || !protocol_name)
     return 0;
+  if (ct->index)
+    return conf_index_lookup(ct, type_name, protocol_name) != CONF_EMPTY;
   for (uint32_t i = 0; i < ct->count; i++) {
     if (ct->entries[i].type_name && ct->entries[i].protocol_name &&
         strcmp(ct->entries[i].type_name, type_name) == 0 &&
@@ -245,6 +358,7 @@ void conformance_table_init_builtins(ConformanceTable *ct) {
   /* Reset count but preserve any already-allocated buffer (this function may
    * be called on a reused table). */
   ct->count = 0;
+  conf_index_reset(ct);   /* drop stale (type,protocol) → entry mappings */
 
   /* ── Int ──────────────────────────────────────────────────────────────────── */
   /* In Swift, Int conforms to: Equatable, Hashable, Comparable,
@@ -263,10 +377,20 @@ void conformance_table_init_builtins(ConformanceTable *ct) {
                                      SW_PROTO_CODABLE,
                                      "Encodable",
                                      "Decodable",
+                                     SW_PROTO_EXPR_BY_INT_LIT,
                                      "Copyable", /* implicit Copyable */
                                      NULL};
   for (int i = 0; int_protos[i]; i++)
     conformance_table_add(ct, SW_TYPE_INT, int_protos[i]);
+
+  /* The rest of the fixed-width integer family adopts integer literals too, so
+   * an Int literal coerces to Int8/…/UInt64 targets (e.g. `let b: UInt8 = 1`). */
+  static const char *int_family[] = {
+      SW_TYPE_INT8,  SW_TYPE_INT16,  SW_TYPE_INT32,  SW_TYPE_INT64,
+      SW_TYPE_UINT,  SW_TYPE_UINT8,  SW_TYPE_UINT16, SW_TYPE_UINT32,
+      SW_TYPE_UINT64, NULL};
+  for (int i = 0; int_family[i]; i++)
+    conformance_table_add(ct, int_family[i], SW_PROTO_EXPR_BY_INT_LIT);
 
   /* ── Double ───────────────────────────────────────────────────────────────── */
   static const char *double_protos[] = {SW_PROTO_EQUATABLE,
@@ -278,6 +402,8 @@ void conformance_table_init_builtins(ConformanceTable *ct) {
                                         SW_PROTO_CUSTOM_STR,
                                         SW_PROTO_SENDABLE,
                                         SW_PROTO_CODABLE,
+                                        SW_PROTO_EXPR_BY_INT_LIT,
+                                        SW_PROTO_EXPR_BY_FLOAT_LIT,
                                         "Copyable",
                                         NULL};
   for (int i = 0; double_protos[i]; i++)
@@ -293,6 +419,8 @@ void conformance_table_init_builtins(ConformanceTable *ct) {
                                        SW_PROTO_CUSTOM_STR,
                                        SW_PROTO_SENDABLE,
                                        SW_PROTO_CODABLE,
+                                       SW_PROTO_EXPR_BY_INT_LIT,
+                                       SW_PROTO_EXPR_BY_FLOAT_LIT,
                                        "Copyable",
                                        NULL};
   for (int i = 0; float_protos[i]; i++)
@@ -303,7 +431,7 @@ void conformance_table_init_builtins(ConformanceTable *ct) {
                                         SW_PROTO_HASHABLE,
                                         SW_PROTO_COMPARABLE,
                                         SW_PROTO_CUSTOM_STR,
-                                        "ExpressibleByStringLiteral",
+                                        SW_PROTO_EXPR_BY_STRING_LIT,
                                         SW_PROTO_SENDABLE,
                                         SW_PROTO_CODABLE,
                                         "Collection",
@@ -315,7 +443,7 @@ void conformance_table_init_builtins(ConformanceTable *ct) {
   /* ── Bool ─────────────────────────────────────────────────────────────────── */
   static const char *bool_protos[] = {
       SW_PROTO_EQUATABLE, SW_PROTO_HASHABLE, SW_PROTO_CUSTOM_STR, SW_PROTO_SENDABLE, SW_PROTO_CODABLE,
-      "Copyable",  NULL};
+      SW_PROTO_EXPR_BY_BOOL_LIT, "Copyable",  NULL};
   for (int i = 0; bool_protos[i]; i++)
     conformance_table_add(ct, SW_TYPE_BOOL, bool_protos[i]);
 

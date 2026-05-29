@@ -33,11 +33,15 @@ Token scan_line_comment(Lexer *l, const uint8_t *s, uint32_t len,
                         uint32_t sp, uint32_t sl, uint32_t sc) {
   l->pos += 2; /* skip "//" */
   const uint8_t *p = s + l->pos, *end = s + len;
+  /* The comment ends at the first '\n' or '\r'.  Scan for '\n' first (memchr
+   * stops at the first hit, so this is O(line)), then look for an earlier '\r'
+   * only *within this line* — never past the newline.  Scanning '\r' over the
+   * whole remaining file would be O(file) per comment, i.e. O(n^2) on sources
+   * with a comment on every line (LF-only files have no '\r' to stop it). */
   const uint8_t *nl_n = memchr(p, '\n', (size_t)(end - p));
-  const uint8_t *nl_r = memchr(p, '\r', (size_t)(end - p));
-  const uint8_t *nl = end;
-  if (nl_n && nl_n < nl) nl = nl_n;
-  if (nl_r && nl_r < nl) nl = nl_r;
+  const uint8_t *line_end = nl_n ? nl_n : end;
+  const uint8_t *nl_r = memchr(p, '\r', (size_t)(line_end - p));
+  const uint8_t *nl = nl_r ? nl_r : line_end;
   l->col += (uint32_t)(nl - p) + 2;
   l->pos = (uint32_t)(nl - s);
   return MAKE_COMMENT_TOK(sp, l, sl, sc);

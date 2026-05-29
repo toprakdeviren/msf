@@ -65,7 +65,9 @@ const char *msf_version(void) {
  * are recorded and accessible via msf_error_*().  The AST is always
  * produced (best-effort recovery).
  */
-MSFResult *msf_analyze(const char *code, const char *filename) {
+static MSFResult *analyze_impl(const char *code, const char *filename,
+                               const char *const *module_types, size_t module_type_count,
+                               const MSFVocab *vocab) {
   if (!code) return NULL;
 
   MSFResult *r = calloc(1, sizeof(MSFResult));
@@ -109,9 +111,35 @@ MSFResult *msf_analyze(const char *code, const char *filename) {
   type_arena_init(&r->type_arena, 0);
   type_builtins_init(&r->type_arena);
   r->sema = sema_init(&r->src, r->ts.tokens, &r->ast_arena, &r->type_arena);
+
+  /* Seed module-level type names (sibling files within the same module, or
+   * imported-module symbols) so references resolve instead of reporting
+   * "use of undeclared type".  Empty for the single-file msf_analyze(). */
+  for (size_t i = 0; i < module_type_count; i++)
+    sema_predeclare_module_type(r->sema, module_types[i]);
+
+  /* A runtime vocabulary, if given, resolves the file's `import X` statements
+   * from a shipped .msfvocab artifact (no SDK needed). */
+  if (vocab)
+    sema_set_vocabulary(r->sema, vocab);
+
   sema_analyze(r->sema, r->root);
 
   return r;
+}
+
+MSFResult *msf_analyze(const char *code, const char *filename) {
+  return analyze_impl(code, filename, NULL, 0, NULL);
+}
+
+MSFResult *msf_analyze_in_module(const char *code, const char *filename,
+                                 const char *const *module_types, size_t module_type_count) {
+  return analyze_impl(code, filename, module_types, module_type_count, NULL);
+}
+
+MSFResult *msf_analyze_with_vocab(const char *code, const char *filename,
+                                  const MSFVocab *vocab) {
+  return analyze_impl(code, filename, NULL, 0, vocab);
 }
 
 /**
@@ -136,6 +164,260 @@ void msf_result_free(MSFResult *r) {
   free(r->src_buf);
   free(r->src_filename);
   free(r);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+ * MSFModule — whole-module analysis over several files
+ * ═══════════════════════════════════════════════════════════════════════════════
+ *
+ * Each file is lexed + parsed into its own token stream / AST (parsed into one
+ * shared AST arena), then sema_analyze_module() runs the passes across all files
+ * with a single shared SemaContext — so cross-file references resolve.
+ */
+
+typedef struct {
+  char            *src_buf;
+  char            *src_filename;
+  Source           src;
+  TokenStream      ts;
+  LexerDiagnostics lex_diag;
+  Parser          *parser;
+  ASTNode         *root;
+} ModuleFile;
+
+struct MSFModule {
+  ModuleFile     *files;
+  size_t          nfiles, cap;
+  ASTArena        ast_arena;   /* shared by every file's parser  */
+  TypeArena       type_arena;  /* shared                          */
+  SemaContext    *sema;        /* created in msf_module_analyze   */
+  const MSFVocab *vocab;       /* optional; borrowed, not owned   */
+  const MSFVocab *sdk_vocab;   /* optional global-fallback SDK vocab; borrowed */
+  int             analyzed;
+  /* Token streams owned by msf_module_parse_expression re-parses, mirroring the
+   * single-file MSFResult.sub_ts; released in msf_module_free. */
+  TokenStream   **sub_ts;
+  size_t          sub_ts_cnt;
+  size_t          sub_ts_cap;
+};
+
+MSFModule *msf_module_create(void) {
+  MSFModule *m = calloc(1, sizeof(MSFModule));
+  if (!m) return NULL;
+  ast_arena_init(&m->ast_arena, 0);
+  type_arena_init(&m->type_arena, 0);
+  type_builtins_init(&m->type_arena);
+  return m;
+}
+
+int msf_module_set_vocabulary(MSFModule *m, const MSFVocab *vocab) {
+  if (!m || m->analyzed) return -1;
+  m->vocab = vocab;
+  return 0;
+}
+
+int msf_module_set_sdk_vocabulary(MSFModule *m, const MSFVocab *vocab) {
+  if (!m || m->analyzed) return -1;
+  m->sdk_vocab = vocab;
+  return 0;
+}
+
+int msf_module_add_file(MSFModule *m, const char *code, const char *filename) {
+  if (!m || !code || m->analyzed) return -1;
+
+  if (m->nfiles == m->cap) {
+    size_t nc = m->cap ? m->cap * 2 : 8;
+    ModuleFile *nf = realloc(m->files, nc * sizeof(ModuleFile));
+    if (!nf) return -1;
+    m->files = nf;
+    m->cap = nc;
+  }
+
+  ModuleFile *f = &m->files[m->nfiles];
+  memset(f, 0, sizeof(*f));
+
+  size_t code_len = strlen(code);
+  f->src_buf = malloc(code_len + 1);
+  if (!f->src_buf) return -1;
+  memcpy(f->src_buf, code, code_len + 1);
+
+  const char *fn = filename ? filename : "<input>";
+  size_t fnl = strlen(fn);
+  f->src_filename = malloc(fnl + 1);
+  if (!f->src_filename) { free(f->src_buf); return -1; }
+  memcpy(f->src_filename, fn, fnl + 1);
+
+  f->src.data = f->src_buf;
+  f->src.len = code_len;
+  f->src.filename = f->src_filename;
+
+  token_stream_init(&f->ts, f->src.len / 4 + 64);
+  if (!f->ts.tokens) { free(f->src_buf); free(f->src_filename); return -1; }
+  lexer_diag_init(&f->lex_diag);
+  if (lexer_tokenize(&f->src, &f->ts, 1, &f->lex_diag) != 0) {
+    for (size_t di = 0; di < f->lex_diag.count; di++) {
+      fprintf(stderr, "error: %s:%u:%u: %s\n",
+              fn, f->lex_diag.line[di], f->lex_diag.col[di], f->lex_diag.message[di]);
+    }
+    token_stream_free(&f->ts);
+    free(f->src_buf);
+    free(f->src_filename);
+    return -1;
+  }
+
+  f->parser = parser_init(&f->src, &f->ts, &m->ast_arena);
+  f->root = parse_source_file(f->parser);
+  m->nfiles++;
+  return 0;
+}
+
+int msf_module_analyze(MSFModule *m) {
+  if (!m || m->analyzed || m->nfiles == 0) return -1;
+
+  /* One shared sema context over the shared arenas.  Seed it with file 0's
+   * source/tokens; sema_analyze_module() swaps per file as it sweeps. */
+  m->sema = sema_init(&m->files[0].src, m->files[0].ts.tokens, &m->ast_arena, &m->type_arena);
+  if (!m->sema) return -1;
+  if (m->vocab)
+    sema_set_vocabulary(m->sema, m->vocab);
+  if (m->sdk_vocab)
+    sema_set_sdk_vocabulary(m->sema, m->sdk_vocab);
+
+  SemaModuleFile *sf = malloc(m->nfiles * sizeof(SemaModuleFile));
+  if (!sf) return -1;
+  for (size_t i = 0; i < m->nfiles; i++) {
+    sf[i].src = &m->files[i].src;
+    sf[i].tokens = m->files[i].ts.tokens;
+    sf[i].token_count = (uint32_t)m->files[i].ts.count;
+    sf[i].root = m->files[i].root;
+  }
+  int rc = sema_analyze_module(m->sema, sf, m->nfiles);
+  free(sf);
+  m->analyzed = 1;
+  return rc;
+}
+
+uint32_t msf_module_error_count(const MSFModule *m) {
+  return (m && m->sema) ? sema_error_count(m->sema) : 0;
+}
+
+const char *msf_module_error_message(const MSFModule *m, uint32_t index) {
+  return (m && m->sema) ? sema_error_message(m->sema, index) : "";
+}
+
+const char *msf_module_error_file(const MSFModule *m, uint32_t index) {
+  return (m && m->sema) ? sema_error_file(m->sema, index) : NULL;
+}
+
+uint32_t msf_module_error_line(const MSFModule *m, uint32_t index) {
+  return (m && m->sema) ? sema_error_line(m->sema, index) : 0;
+}
+
+uint32_t msf_module_error_col(const MSFModule *m, uint32_t index) {
+  return (m && m->sema) ? sema_error_col(m->sema, index) : 0;
+}
+
+/* Source byte length of the offending range (end - start), for sizing an
+ * editor underline; 0 if unknown. */
+uint32_t msf_module_error_length(const MSFModule *m, uint32_t index) {
+  if (!m || !m->sema) return 0;
+  uint32_t s = sema_error_start(m->sema, index), e = sema_error_end(m->sema, index);
+  return e > s ? e - s : 0;
+}
+
+size_t msf_module_file_count(const MSFModule *m) { return m ? m->nfiles : 0; }
+
+const char *msf_module_file_name(const MSFModule *m, size_t i) {
+  return (m && i < m->nfiles) ? m->files[i].src_filename : NULL;
+}
+
+const ASTNode *msf_module_file_root(const MSFModule *m, size_t i) {
+  return (m && i < m->nfiles) ? m->files[i].root : NULL;
+}
+
+const Source *msf_module_file_source(const MSFModule *m, size_t i) {
+  return (m && i < m->nfiles) ? &m->files[i].src : NULL;
+}
+
+const Token *msf_module_file_tokens(const MSFModule *m, size_t i) {
+  return (m && i < m->nfiles) ? m->files[i].ts.tokens : NULL;
+}
+
+size_t msf_module_file_token_count(const MSFModule *m, size_t i) {
+  return (m && i < m->nfiles) ? m->files[i].ts.count : 0;
+}
+
+size_t msf_module_entry_file_index(const MSFModule *m) {
+  if (!m) return (size_t)-1;
+  for (size_t f = 0; f < m->nfiles; f++) {
+    const ASTNode *root = m->files[f].root;
+    if (!root) continue;
+    for (const ASTNode *c = root->first_child; c; c = c->next_sibling) {
+      switch (c->kind) {
+      case AST_LET_DECL:   case AST_VAR_DECL:   case AST_EXPR_STMT:
+      case AST_RETURN_STMT:case AST_IF_STMT:    case AST_GUARD_STMT:
+      case AST_WHILE_STMT: case AST_REPEAT_STMT:case AST_FOR_STMT:
+      case AST_DEFER_STMT: case AST_THROW_STMT: case AST_DO_STMT:
+      case AST_SWITCH_STMT:case AST_BREAK_STMT:
+        return f;
+      default:
+        break;
+      }
+    }
+  }
+  return (size_t)-1;
+}
+
+const ASTNode *msf_module_parse_expression(MSFModule *m, const char *expr_text,
+                                           const Token **out_tokens) {
+  if (!m || !expr_text) return NULL;
+
+  TokenStream *ts = NULL;
+  ASTNode *node = parse_expression_from_cstring_with_tokens(
+      &m->ast_arena, expr_text, &ts);
+  if (!node) {
+    if (ts) { token_stream_free(ts); free(ts); }
+    return NULL;
+  }
+
+  /* Keep the token stream alive for as long as the module does. */
+  if (m->sub_ts_cnt == m->sub_ts_cap) {
+    size_t nc = m->sub_ts_cap ? m->sub_ts_cap * 2 : 4;
+    TokenStream **nb = realloc(m->sub_ts, nc * sizeof(*nb));
+    if (!nb) {
+      token_stream_free(ts);
+      free(ts);
+      if (out_tokens) *out_tokens = NULL;
+      return node;
+    }
+    m->sub_ts = nb;
+    m->sub_ts_cap = nc;
+  }
+  m->sub_ts[m->sub_ts_cnt++] = ts;
+
+  if (out_tokens) *out_tokens = ts->tokens;
+  return node;
+}
+
+void msf_module_free(MSFModule *m) {
+  if (!m) return;
+  if (m->sema) sema_destroy(m->sema);
+  for (size_t i = 0; i < m->nfiles; i++) {
+    parser_destroy(m->files[i].parser);
+    token_stream_free(&m->files[i].ts);
+    free(m->files[i].src_buf);
+    free(m->files[i].src_filename);
+  }
+  /* Release sub-expression token streams owned by msf_module_parse_expression. */
+  for (size_t i = 0; i < m->sub_ts_cnt; i++) {
+    token_stream_free(m->sub_ts[i]);
+    free(m->sub_ts[i]);
+  }
+  free(m->sub_ts);
+  free(m->files);
+  type_arena_free(&m->type_arena);
+  ast_arena_free(&m->ast_arena);
+  free(m);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════════

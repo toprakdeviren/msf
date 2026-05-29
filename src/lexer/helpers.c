@@ -23,9 +23,17 @@
  * ═══════════════════════════════════════════════════════════════════════════════ */
 
 const MultiCharOp MULTI_OPS[] = {
+    /* 4-char: masking-shift compound assignment (must precede 3-/2-char prefixes) */
+    {"&<<=", 4, OP_MASK_SHL_ASSIGN}, {"&>>=", 4, OP_MASK_SHR_ASSIGN},
     /* 3-char */
     {"...", 3, OP_RANGE_INCL}, {"..<", 3, OP_RANGE_EXCL},
     {"===", 3, OP_IDENTITY_EQ}, {"!==", 3, OP_IDENTITY_NEQ},
+    /* 3-char: masking shift + wrapping/shift compound assignment
+     * (must precede the 2-char `&+`/`&-`/`&*`/`<<`/`>>` prefixes below) */
+    {"&<<", 3, OP_MASK_SHL}, {"&>>", 3, OP_MASK_SHR},
+    {"&+=", 3, OP_WRAP_ADD_ASSIGN}, {"&-=", 3, OP_WRAP_SUB_ASSIGN},
+    {"&*=", 3, OP_WRAP_MUL_ASSIGN},
+    {"<<=", 3, OP_SHL_ASSIGN}, {">>=", 3, OP_SHR_ASSIGN},
     /* 2-char: wrapping arithmetic */
     {"&+", 2, OP_WRAP_ADD}, {"&-", 2, OP_WRAP_SUB}, {"&*", 2, OP_WRAP_MUL},
     /* 2-char: arrows */

@@ -159,6 +159,12 @@ typedef enum {
   OP_WRAP_ADD,   /* &+  */  OP_WRAP_SUB,   /* &-  */
   OP_WRAP_MUL,   /* &*  */
   OP_IDENTITY_EQ,/* === */  OP_IDENTITY_NEQ,/* !== */
+  /* Appended (keep at end — preserves enum numbering / lib ABI). */
+  OP_SHL_ASSIGN,      /* <<=  */  OP_SHR_ASSIGN,      /* >>=  */
+  OP_WRAP_ADD_ASSIGN, /* &+=  */  OP_WRAP_SUB_ASSIGN, /* &-=  */
+  OP_WRAP_MUL_ASSIGN, /* &*=  */
+  OP_MASK_SHL,        /* &<<  */  OP_MASK_SHR,        /* &>>  */
+  OP_MASK_SHL_ASSIGN, /* &<<= */  OP_MASK_SHR_ASSIGN, /* &>>= */
 } OpKind;
 
 /* — The token itself ------------------------------------------------------ */
@@ -547,6 +553,9 @@ typedef enum {
   AST_PATTERN_VALUE_BINDING,
   AST_OPTIONAL_BINDING,
 
+  /* Macros (Swift 5.9) — appended so existing values stay put. */
+  AST_MACRO_DECL,
+
   AST__COUNT
 } ASTNodeKind;
 
@@ -630,6 +639,10 @@ const char *ast_kind_name(ASTNodeKind k);
 /** @brief Opaque result of msf_analyze().  Free with msf_result_free(). */
 typedef struct MSFResult MSFResult;
 
+/** @brief Opaque module vocabulary (defined in §5c) — forward-declared so the
+ *  analyze prototypes below can take it by pointer. */
+typedef struct MSFVocab MSFVocab;
+
 /**
  * @brief Returns the library version string.
  * @return  Static string, e.g. "0.1.0".
@@ -653,10 +666,568 @@ const char *msf_version(void);
 MSFResult *msf_analyze(const char *code, const char *filename);
 
 /**
+ * @brief Like msf_analyze(), but with module-level type names predeclared.
+ *
+ * msf analyzes one file at a time, so a reference to a type declared in a
+ * sibling file of the same module — or in an imported module — would otherwise
+ * report "use of undeclared type". Pass those type names here (e.g. collected
+ * from the module's other files, or from an SDK's `.swiftinterface`) and they
+ * are injected into the global scope so such references resolve.
+ *
+ * @param code               NUL-terminated Swift source code.
+ * @param filename           File name for diagnostics, or NULL.
+ * @param module_types       Array of type names known to be in scope.
+ * @param module_type_count  Number of entries in @p module_types.
+ * @return                   Analysis result (opaque). NULL on allocation failure.
+ */
+MSFResult *msf_analyze_in_module(const char *code, const char *filename,
+                                 const char *const *module_types, size_t module_type_count);
+
+/**
+ * @brief Like msf_analyze(), but resolves the file's `import X` statements
+ *        against a loaded module vocabulary (see §5c).
+ *
+ * For each `import X`, X's public type names from @p vocab are predeclared, so
+ * references resolve with no SDK present.  Falls back to the host's compiled
+ * module table for imports the vocabulary doesn't cover.  @p vocab is borrowed.
+ *
+ * @param code      Swift source (NUL-terminated).  Copied internally.
+ * @param filename  File name for diagnostics, or NULL.
+ * @param vocab     Loaded vocabulary (msf_vocab_parse / msf_vocab_create), or NULL.
+ * @return          Result (free with msf_result_free), or NULL on allocation failure.
+ */
+MSFResult *msf_analyze_with_vocab(const char *code, const char *filename,
+                                  const struct MSFVocab *vocab);
+
+/**
  * @brief Frees all resources held by an analysis result.
  * @param r  Result to free (may be NULL).
  */
 void msf_result_free(MSFResult *r);
+
+/* ┌──────────────────────────────────────────────────────────────────────────┐
+ * │  5b. WHOLE-MODULE — analyze several files as one unit                   │
+ * └──────────────────────────────────────────────────────────────────────────┘
+ *
+ * A Swift module is a SET of files compiled together; a type declared in one
+ * file is visible to its siblings.  Analyzing files in isolation reports those
+ * sibling types as "undeclared".  MSFModule analyzes them as a unit: all files
+ * are parsed, their declarations collected into one shared symbol table, then
+ * every file is resolved against it — so cross-file references resolve, with no
+ * SDK stubs and no text concatenation (each file keeps its own source/tokens).
+ *
+ *   MSFModule *m = msf_module_create();
+ *   msf_module_add_file(m, codeA, "A.swift");
+ *   msf_module_add_file(m, codeB, "B.swift");
+ *   msf_module_analyze(m);
+ *   for (uint32_t i = 0; i < msf_module_error_count(m); i++) ...
+ *   msf_module_free(m);
+ */
+
+/** @brief Opaque whole-module analysis unit.  Free with msf_module_free(). */
+typedef struct MSFModule MSFModule;
+
+/** @brief Creates an empty module.  NULL on allocation failure. */
+MSFModule *msf_module_create(void);
+
+/**
+ * @brief Lexes + parses one source file and adds it to the module.
+ *
+ * Copies @p code (caller may free immediately).  Must be called before
+ * msf_module_analyze().
+ *
+ * @return 0 on success, non-zero on tokenize/allocation failure (file skipped).
+ */
+int msf_module_add_file(MSFModule *m, const char *code, const char *filename);
+
+/**
+ * @brief Attaches a runtime module vocabulary (see §5c) to resolve `import`s.
+ *
+ * Call before msf_module_analyze().  Each file's `import X` resolves X's types
+ * from @p vocab, falling back to the host's compiled module table.  Borrowed.
+ *
+ * @return 0 on success, non-zero if the module was already analyzed.
+ */
+int msf_module_set_vocabulary(MSFModule *m, const struct MSFVocab *vocab);
+
+/**
+ * @brief Attaches an SDK vocabulary used as a global last-resort fallback.
+ *
+ * Unlike msf_module_set_vocabulary() (per-import resolution), a type name found
+ * in ANY module of @p vocab resolves regardless of imports — SDK types are
+ * reachable through re-export chains not modeled per-import.  Keep it separate
+ * from the per-import vocabulary so project modules' types stay import-scoped.
+ * Borrowed.  Call before msf_module_analyze().
+ */
+int msf_module_set_sdk_vocabulary(MSFModule *m, const struct MSFVocab *vocab);
+
+/**
+ * @brief Runs whole-module semantic analysis over all added files.
+ * @return 0 if no diagnostics, 1 if any, negative on error. Call once.
+ */
+int msf_module_analyze(MSFModule *m);
+
+/** @brief Total semantic diagnostics across the module (after analyze). */
+uint32_t msf_module_error_count(const MSFModule *m);
+
+/** @brief Diagnostic message at @p index, or "" if out of range. */
+const char *msf_module_error_message(const MSFModule *m, uint32_t index);
+
+/** @brief File path the diagnostic at @p index belongs to (whole-module: the
+ *  offending node's origin file), or NULL.  The pointer is owned by the module;
+ *  valid until msf_module_free(). */
+const char *msf_module_error_file(const MSFModule *m, uint32_t index);
+
+/** @brief 1-based line of the diagnostic at @p index (0 if unknown). */
+uint32_t msf_module_error_line(const MSFModule *m, uint32_t index);
+
+/** @brief 1-based column of the diagnostic at @p index (0 if unknown). */
+uint32_t msf_module_error_col(const MSFModule *m, uint32_t index);
+
+/** @brief Byte length of the offending range at @p index (0 if unknown). */
+uint32_t msf_module_error_length(const MSFModule *m, uint32_t index);
+
+/** @brief Number of files successfully added to the module. */
+size_t msf_module_file_count(const MSFModule *m);
+
+/* — Per-file results -------------------------------------------------------- *
+ *
+ * After msf_module_analyze(), each file's typed AST, source, and token stream
+ * remain available individually — the same handles msf_root/source/tokens give
+ * for a single MSFResult, but indexed per file.  A backend (e.g. IR generation)
+ * can iterate the module's files and lower each file's resolved AST into one
+ * shared output.  All pointers are owned by @p m and valid until
+ * msf_module_free(); @p i must be < msf_module_file_count(). */
+
+/** @brief File name of file @p i (as passed to msf_module_add_file), or NULL. */
+const char *msf_module_file_name(const MSFModule *m, size_t i);
+
+/** @brief Root AST node of file @p i, or NULL if out of range. */
+const ASTNode *msf_module_file_root(const MSFModule *m, size_t i);
+
+/** @brief Source buffer of file @p i, or NULL if out of range. */
+const Source *msf_module_file_source(const MSFModule *m, size_t i);
+
+/** @brief Token array of file @p i (TOK_EOF-terminated), or NULL. */
+const Token *msf_module_file_tokens(const MSFModule *m, size_t i);
+
+/** @brief Token count of file @p i (0 if out of range). */
+size_t msf_module_file_token_count(const MSFModule *m, size_t i);
+
+/**
+ * @brief Index of the file carrying top-level executable code — the module's
+ *        entry (Swift permits this only in main.swift / an @main file), or
+ *        SIZE_MAX if the module has none.  Call after msf_module_analyze().
+ */
+size_t msf_module_entry_file_index(const MSFModule *m);
+
+/**
+ * @brief Like msf_parse_expression(), but parses into the module's shared arena.
+ *
+ * For re-parsing a bare expression (e.g. a string-interpolation segment) while
+ * lowering one of the module's files.  The returned node and its tokens live in
+ * @p m and need no cleanup; @p out_tokens receives the token array for
+ * token_text() (or NULL if unavailable).  Call after msf_module_analyze().
+ */
+const ASTNode *msf_module_parse_expression(MSFModule *m, const char *expr_text,
+                                           const Token **out_tokens);
+
+/** @brief Frees the module and everything it owns (may be NULL). */
+void msf_module_free(MSFModule *m);
+
+/* ┌──────────────────────────────────────────────────────────────────────────┐
+ * │  5c. MODULE VOCABULARY — portable type index from .swiftinterface       │
+ * └──────────────────────────────────────────────────────────────────────────┘
+ *
+ * A "vocabulary" is the set of public type names a module exports — the data
+ * needed to resolve cross-module references (`import SwiftUI` → `View`, `Text`,
+ * ...) without the module's compiled form.  msf extracts it by parsing a
+ * module's textual `.swiftinterface` with its OWN parser, then serializes it to
+ * a compact, portable text format (`.msfvocab`) that ships as a build artifact.
+ *
+ * This decouples type resolution from the host SDK: the generator runs once on
+ * a machine that has the SDK; the resulting `.msfvocab` is then loaded anywhere
+ * — browser (WASM), Windows — where no SDK, `xcrun`, or `.swiftinterface` exists.
+ *
+ *   // Generate (on a machine with the SDK):
+ *   MSFVocab *v = msf_vocab_create();
+ *   msf_vocab_add_interface(v, "SwiftUI", swiftui_interface_src);
+ *   char *text = msf_vocab_serialize(v);          // write to SwiftUI.msfvocab
+ *
+ *   // Load (anywhere) and resolve against it:
+ *   MSFVocab *v = msf_vocab_parse(text);
+ *   size_t n; const char *const *names = msf_vocab_module_types(v, "SwiftUI", &n);
+ *   MSFResult *r = msf_analyze_in_module(code, "View.swift", names, n);
+ */
+
+/** @brief A type's declaration kind within a module vocabulary. */
+typedef enum {
+  MSF_VOCAB_STRUCT    = 0,
+  MSF_VOCAB_CLASS     = 1,
+  MSF_VOCAB_ENUM      = 2,
+  MSF_VOCAB_PROTOCOL  = 3,
+  MSF_VOCAB_ACTOR     = 4,
+  MSF_VOCAB_TYPEALIAS = 5,
+} MSFVocabKind;
+
+/** @brief A member's declaration kind within a type's vocabulary entry. */
+typedef enum {
+  MSF_VOCAB_MEMBER_FUNC      = 0,  /**< method / function          */
+  MSF_VOCAB_MEMBER_PROPERTY  = 1,  /**< var / let                  */
+  MSF_VOCAB_MEMBER_INIT      = 2,  /**< initializer                */
+  MSF_VOCAB_MEMBER_SUBSCRIPT = 3,  /**< subscript                  */
+  MSF_VOCAB_MEMBER_CASE      = 4,  /**< enum case / element        */
+  MSF_VOCAB_MEMBER_TYPEALIAS = 5,  /**< nested typealias           */
+} MSFVocabMemberKind;
+
+/* MSFVocab is forward-declared in §5 (opaque; free with msf_vocab_free()). */
+
+/** @brief Creates an empty vocabulary.  NULL on allocation failure. */
+MSFVocab *msf_vocab_create(void);
+
+/**
+ * @brief Returns the SDK vocabulary compiled into the library.
+ *
+ * This is generated/sdk_vocab.h (produced by `make sdk-vocab`) parsed into a
+ * fresh MSFVocab — the public types of the installed Swift SDK modules, baked
+ * in so `import SwiftUI`/`Foundation`/… resolve with no SDK present (browser,
+ * Windows).  Empty if the project was built without a generated vocabulary.
+ * Caller frees with msf_vocab_free().
+ */
+MSFVocab *msf_vocab_builtin(void);
+
+/**
+ * @brief Materialize types that are only REFERENCED (in a conformance /
+ *        superclass clause) but never declared in the vocab.
+ *
+ * A `.swiftinterface` references ObjC/C-originated SDK types (UICoordinateSpace,
+ * OSStatus, CFIndex, …) without declaring them, so the vocab has no entry and
+ * Swift uses report "use of undeclared type".  This adds each such name as a
+ * type (into a synthetic `__objc_referenced` module).  Called by
+ * msf_vocab_builtin(); safe to call on any fully-built vocab.
+ *
+ * @return Number of types materialized.
+ */
+size_t    msf_vocab_materialize_referenced_types(MSFVocab *v);
+
+/**
+ * @brief Parses one module's `.swiftinterface` source and merges its public
+ *        type vocabulary into @p v under @p module_name.
+ *
+ * Uses msf's own lexer + parser (no sema); tolerant of declarations msf cannot
+ * fully parse.  Collects public/open nominal types (struct/class/enum/protocol/
+ * actor) and typealiases, including those nested inside types and extensions.
+ * Names already present for the module are not duplicated.
+ *
+ * @return Number of new type names added (0 on parse/allocation failure).
+ */
+size_t msf_vocab_add_interface(MSFVocab *v, const char *module_name,
+                               const char *interface_src);
+
+/**
+ * @brief Like msf_vocab_add_interface, but records the module's INTERNAL
+ *        (non-private) types/members too, not just public/open ones.
+ *
+ * Models `@testable import`: a test target sees the imported module's internal
+ * declarations.  Pair with msf_vocab_module_type_count + msf_vocab_module_truncate
+ * to add a dependency's internals for one importer's analysis and then restore,
+ * so internals do not leak to plain importers.
+ */
+size_t msf_vocab_add_interface_testable(MSFVocab *v, const char *module_name,
+                                        const char *interface_src);
+
+/** @brief Number of types currently recorded for a module (by name), 0 if absent. */
+size_t msf_vocab_module_type_count(const MSFVocab *v, const char *module_name);
+
+/** @brief Drops a module's types down to @p count (freeing the removed entries);
+ *  no-op if the module is absent or already at/below count. */
+void msf_vocab_module_truncate(MSFVocab *v, const char *module_name,
+                               size_t count);
+
+/**
+ * @brief Serializes the vocabulary to the portable `.msfvocab` text format.
+ * @return Heap-allocated NUL-terminated text (caller frees with free()), or NULL.
+ */
+char *msf_vocab_serialize(const MSFVocab *v);
+
+/** @brief Parses `.msfvocab` text into a vocabulary.  NULL on error. */
+MSFVocab *msf_vocab_parse(const char *text);
+
+/**
+ * @brief Adds a single (name, kind) type to @p module (creating it if needed),
+ *        deduplicating by name.  For sources other than `.swiftinterface` — e.g.
+ *        type names harvested from Objective-C framework headers.
+ * @return 1 if newly added, 0 if duplicate / on failure.
+ */
+int msf_vocab_add_type(MSFVocab *v, const char *module, const char *name,
+                       MSFVocabKind kind);
+
+/** @brief Number of modules in the vocabulary. */
+size_t msf_vocab_module_count(const MSFVocab *v);
+
+/** @brief Name of module @p index, or NULL if out of range. */
+const char *msf_vocab_module_name(const MSFVocab *v, size_t index);
+
+/** @brief Number of types in module @p index. */
+size_t msf_vocab_type_count(const MSFVocab *v, size_t index);
+
+/** @brief Name of type @p t in module @p m, or NULL if out of range. */
+const char *msf_vocab_type_name(const MSFVocab *v, size_t m, size_t t);
+
+/** @brief Kind of type @p t in module @p m (meaningful only when name != NULL). */
+MSFVocabKind msf_vocab_type_kind(const MSFVocab *v, size_t m, size_t t);
+
+/** @brief Space-joined direct protocol conformances of type @p t in module @p m
+ *  (`.msfvocab` v3), or NULL if none recorded. */
+const char *msf_vocab_type_conformances(const MSFVocab *v, size_t m, size_t t);
+
+/* — Members (`.msfvocab` v2): per-type method/property/init/… signatures ---- */
+
+/** @brief Number of recorded members of type @p t in module @p m. */
+size_t msf_vocab_member_count(const MSFVocab *v, size_t m, size_t t);
+
+/**
+ * @brief Signature text of member @p i of type @p t in module @p m, or NULL.
+ *
+ * The signature is the declaration's source spelling with the body and
+ * surrounding whitespace removed, e.g. "addSubview(_ view: UIView)" or
+ * "layer: CALayer".  Owned by @p v; valid until msf_vocab_free().
+ */
+const char *msf_vocab_member_signature(const MSFVocab *v, size_t m, size_t t,
+                                       size_t i);
+
+/** @brief Kind of member @p i of type @p t in module @p m. */
+MSFVocabMemberKind msf_vocab_member_kind(const MSFVocab *v, size_t m, size_t t,
+                                         size_t i);
+
+/**
+ * @brief Finds member @p member_name of type @p type_name anywhere in the
+ *        vocabulary; returns its signature (borrowed, owned by @p v) and, via
+ *        @p out_kind, its kind.  NULL if not found.
+ *
+ * Matches by the member's name — the signature up to its first '(', ':', '<',
+ * '?', '!' or space.  Used to resolve SDK member accesses (`view.layer`) with no
+ * SDK present.  When a type has both a property and a same-named method,
+ * @p prefer_callable picks the method (a call site `obj.m(...)`) over the
+ * property (a plain access `obj.m`); the other is used if the preferred kind is
+ * absent.
+ */
+const char *msf_vocab_find_member(const MSFVocab *v, const char *type_name,
+                                  const char *member_name, int prefer_callable,
+                                  MSFVocabMemberKind *out_kind);
+
+/* — Dependency graph (`.msfvocab` v2): which modules each module imports ---- */
+
+/** @brief Number of modules that module @p m imports (its dependency edges). */
+size_t msf_vocab_module_dep_count(const MSFVocab *v, size_t m);
+
+/** @brief Name of dependency @p d of module @p m, or NULL.  Borrowed by @p v. */
+const char *msf_vocab_module_dep(const MSFVocab *v, size_t m, size_t d);
+
+/**
+ * @brief Computes the transitive import closure of @p seeds over the dependency
+ *        graph — the full set of modules reachable from a project's imports
+ *        (e.g. `import SwiftUI` pulls in Foundation, Combine, CoreGraphics, …),
+ *        which is exactly the set of vocabularies to load for that project.
+ *
+ * Writes up to @p out_cap module names (borrowed, owned by @p v) into @p out and
+ * returns the closure size — which may exceed @p out_cap, so pass NULL/0 to size
+ * first, then call again with a buffer.  Seeds and edges naming a module not
+ * present in @p v are skipped.
+ */
+size_t msf_vocab_import_closure(const MSFVocab *v, const char *const *seeds,
+                                size_t seed_count, const char **out,
+                                size_t out_cap);
+
+/**
+ * @brief Returns the flat array of type names for @p module_name, ready to pass
+ *        to msf_analyze_in_module().
+ *
+ * The array and its strings are owned by @p v and stay valid until
+ * msf_vocab_free().  Writes the count to *out_count.
+ *
+ * @return NULL (and *out_count = 0) if the module is not present.
+ */
+const char *const *msf_vocab_module_types(const MSFVocab *v,
+                                          const char *module_name,
+                                          size_t *out_count);
+
+/**
+ * @brief Is @p name a public type in ANY module of the vocabulary?
+ *
+ * A whole-SDK presence check used as a resolution fallback: an SDK type is
+ * reachable in real Swift via re-export chains (Foundation → CoreFoundation,
+ * CoreLocation → _LocationEssentials, …) that the per-module import view does
+ * not model.  Treating the vocabulary as one global name pool resolves such
+ * names without enumerating every re-export edge.
+ */
+int msf_vocab_has_type(const MSFVocab *v, const char *name);
+
+/** @brief Frees the vocabulary and everything it owns (may be NULL). */
+void msf_vocab_free(MSFVocab *v);
+
+/* ┌──────────────────────────────────────────────────────────────────────────┐
+ * │  5d. PROJECT — discover the module graph of an Xcode / SwiftPM project   │
+ * └──────────────────────────────────────────────────────────────────────────┘
+ *
+ * Open a project directory and get its modules (one per Xcode target / SwiftPM
+ * target), each with its discovered Swift source files — then analyze any module
+ * as a unit.  Discovery is generic and reads only the project's own metadata
+ * (no project is special-cased): modern Xcode "synchronized folder" targets and
+ * SwiftPM `.target/.executableTarget/.testTarget` declarations.
+ *
+ *   MSFProject *proj = msf_project_open("/path/to/MyApp");
+ *   for (size_t i = 0; i < msf_project_module_count(proj); i++) {
+ *     MSFModule *m = msf_project_analyze_module(proj, i);   // whole-module
+ *     printf("%s: %u diagnostics\n",
+ *            msf_project_module_name(proj, i), msf_module_error_count(m));
+ *     msf_module_free(m);
+ *   }
+ *   msf_project_free(proj);
+ *
+ * Reads the filesystem, so it is a native-host feature; the WebAssembly build
+ * (no host filesystem) returns an empty project / NULL module.  Each module is
+ * analyzed independently — references to OTHER modules' types appear as
+ * undeclared, which a loaded vocabulary (§5c) is meant to supply.
+ */
+
+/** @brief Opaque discovered project (module graph).  Free with msf_project_free(). */
+typedef struct MSFProject MSFProject;
+
+/**
+ * @brief Discovers every Xcode/SwiftPM module under @p root_dir.
+ * @return Project handle (possibly with zero modules), or NULL on alloc failure
+ *         / unsupported build.  Free with msf_project_free().
+ */
+MSFProject *msf_project_open(const char *root_dir);
+
+/** @brief Number of discovered modules. */
+size_t      msf_project_module_count(const MSFProject *p);
+
+/** @brief Module @p i's name (target name), or NULL if out of range. */
+const char *msf_project_module_name(const MSFProject *p, size_t i);
+
+/** @brief Module @p i's kind: "xcode-target", "spm-target", or "spm-test". */
+const char *msf_project_module_kind(const MSFProject *p, size_t i);
+
+/** @brief Module @p i's source root directory (absolute), or NULL. */
+const char *msf_project_module_dir(const MSFProject *p, size_t i);
+
+/** @brief Number of discovered .swift files in module @p i. */
+size_t      msf_project_module_file_count(const MSFProject *p, size_t i);
+
+/** @brief Path of source file @p j in module @p i, or NULL if out of range. */
+const char *msf_project_module_file(const MSFProject *p, size_t i, size_t j);
+
+/** @brief Number of in-project modules that module @p i depends on (derived
+ *         from its `import` statements that name another discovered module). */
+size_t      msf_project_module_dep_count(const MSFProject *p, size_t i);
+
+/** @brief Index of dependency @p k of module @p i, or (size_t)-1 if out of range. */
+size_t      msf_project_module_dep(const MSFProject *p, size_t i, size_t k);
+
+/**
+ * @brief Index of the project's executable target — the build entry — or
+ *        SIZE_MAX if the project has no executable (pure library / unresolved).
+ *        Distinguished from libraries by `.executableTarget` in Package.swift.
+ */
+size_t      msf_project_entry_module(const MSFProject *p);
+
+/**
+ * @brief Writes module indices in dependency order (each module after the
+ *        modules it depends on) into @p out, up to @p cap entries, and returns
+ *        the count written.  This is the order to analyze/compile in so a
+ *        module's `import <sibling>` resolves the sibling's already-built types.
+ *        Cycles are tolerated (a node already on the DFS stack is not re-entered).
+ */
+size_t      msf_project_compile_order(const MSFProject *p, size_t *out, size_t cap);
+
+/**
+ * @brief Harvests public type NAMES from the project's bundled binary
+ *        frameworks (.xcframework ObjC headers, which ship in the repo) into
+ *        @p v, each under its framework's module name.
+ *
+ * Lets `import <Framework>` references resolve with no toolchain, on any OS —
+ * the headers travel with the project.  Generic: reads only @interface /
+ * @protocol / @class / NS_ENUM / typedef forms (incl. macro-wrapped class
+ * names), no per-framework knowledge.  Positive-only — names, not signatures.
+ *
+ * @return Number of frameworks harvested.
+ */
+size_t      msf_project_harvest_frameworks(const MSFProject *p, MSFVocab *v);
+
+/**
+ * @brief Harvest the public type surface of vendored dependency managers
+ *        (CocoaPods `Pods/`, Carthage `Carthage/`) into the vocab.
+ *
+ * The vendored dependency SOURCE is NOT analyzed as project modules (that would
+ * count each dependency's own sema errors against the app); only the public
+ * type names are published, so the app's `import <Dep>` references resolve.
+ * Harvests the Pods source tree (.swift/.h), Carthage's prebuilt
+ * `.framework`s (ObjC Headers + textual `.swiftinterface`), and Carthage's
+ * checked-out source (.swift).
+ *
+ * @return Number of pods + Carthage frameworks/checkouts harvested.
+ */
+size_t      msf_project_harvest_packages(const MSFProject *p, MSFVocab *v);
+
+/**
+ * @brief Harvest the project's OWN Objective-C header type surface into the vocab.
+ *
+ * Mixed ObjC/Swift apps define types in `.h` headers inside their own modules
+ * and use them from Swift via ObjC interop; analysis reads only the `.swift`
+ * files, so those ObjC classes are otherwise "undeclared".  Walks each
+ * discovered module's directory for `.h` files and publishes their type names
+ * (no analysis).  Pass the vocab that serves as the global fallback (the one set
+ * via msf_project_set_sdk_vocabulary) so the names resolve unqualified.
+ *
+ * @return Number of modules scanned.
+ */
+size_t      msf_project_harvest_own_headers(const MSFProject *p, MSFVocab *v);
+
+/** @brief Number of distinct modules imported across the project that are NOT
+ *         project modules — i.e. external/SDK frameworks (SwiftUI, Foundation,
+ *         …).  These are the modules a vocabulary (§5c) would supply. */
+size_t      msf_project_external_import_count(const MSFProject *p);
+
+/** @brief Name of external import @p k, or NULL if out of range. */
+const char *msf_project_external_import(const MSFProject *p, size_t k);
+
+/**
+ * @brief Builds and runs whole-module analysis for module @p i (reads its files
+ *        from disk).
+ * @return Analyzed module — inspect via msf_module_error_*; free with
+ *         msf_module_free().  NULL on error / unsupported build.
+ */
+MSFModule  *msf_project_analyze_module(const MSFProject *p, size_t i);
+
+/**
+ * @brief Like msf_project_analyze_module(), but resolves cross-module references
+ *        through @p shared_vocab and then publishes module @p i's own public
+ *        types into it.
+ *
+ * Analyze modules in dependency order (see msf_project_module_dep): a module's
+ * `import X` resolves X's types from @p shared_vocab once X has been analyzed.
+ * Pass the SAME vocabulary (msf_vocab_create()) across the whole sweep; free it
+ * after.  This collapses the cross-module "undeclared type" surface.
+ *
+ * @return Analyzed module (free with msf_module_free()), or NULL.
+ */
+MSFModule  *msf_project_analyze_module_resolved(const MSFProject *p, size_t i,
+                                                MSFVocab *shared_vocab);
+
+/**
+ * @brief Sets a global-fallback SDK vocabulary for resolved analysis.
+ *
+ * Applied to every module analyzed via msf_project_analyze_module_resolved():
+ * an SDK type name resolves globally (regardless of imports), while the
+ * per-import shared vocabulary keeps project modules' types import-scoped.
+ * Borrowed — keep it alive across analysis.
+ */
+void        msf_project_set_sdk_vocabulary(MSFProject *p, const struct MSFVocab *v);
+
+/** @brief Frees the project and everything it owns (may be NULL). */
+void        msf_project_free(MSFProject *p);
 
 /* ┌──────────────────────────────────────────────────────────────────────────┐
  * │  6. READ — inspect the result                                          │
@@ -1040,6 +1611,12 @@ typedef struct ConformanceTable {
   ConformanceRecord *entries;
   uint32_t           count;
   uint32_t           capacity;
+  /* (internal) msf-private lookup-acceleration index — a (type,protocol)
+   * hash over `entries`, maintained by conformance_table_add().  Lets
+   * conformance_table_has()/_get_where() answer in O(1) instead of an O(count)
+   * scan.  Read-only consumers must ignore this field; it is not part of the
+   * stable record data. */
+  void              *index;
 } ConformanceTable;
 
 /** @brief Register all built-in Swift conformances (Int: Equatable, …). */

@@ -21,10 +21,16 @@
 /** @brief Max number of parse errors before silently dropping. */
 #define MAX_PARSE_ERRORS      32
 
-/** @brief Max number of sema diagnostics. The last slot is reserved for an
- *         "and N more diagnostics suppressed" overflow indicator so callers
- *         don't mistake a truncated list for "no further errors". */
-#define MAX_SEMA_ERRORS       64
+/** @brief Sema diagnostics live in a heap array that grows on demand, starting
+ *         at this capacity (see SemaContext.diags in private.h). */
+#define SEMA_DIAG_INITIAL_CAP 16u
+
+/** @brief Hard ceiling on retained sema diagnostics — a DoS guard against
+ *         pathological inputs.  The last retained slot carries an
+ *         "and N more diagnostics suppressed" summary so a truncated list is
+ *         never mistaken for "no further errors".  Whole-module analysis of
+ *         real modules stays well under this. */
+#define SEMA_DIAG_MAX         100000u
 
 /* The MAX_PRECEDENCE_GROUPS and MAX_CUSTOM_OPERATORS caps used to bound the
  * per-Parser arrays in private.h; those tables are now heap-grown so the
@@ -37,6 +43,22 @@
 
 /** @brief Max precedence group names for duplicate checking. */
 #define SEMA_PG_NAMES_MAX     32
+
+/** @brief Max nested re-entry of resolve_type_ident before bailing out, to
+ *  contain cyclic type-alias / nested-type chains (real code never nests type
+ *  resolution remotely this deep; the limit only trips on a resolution cycle). */
+#define SEMA_TYPE_RESOLVE_MAX_DEPTH 128u
+
+/** @brief Max recursion depth of resolve_node (the central AST-node resolver),
+ *  guarding against self-referential decl/member/expr resolution cycles that
+ *  would otherwise overflow the stack.  Set well above any legitimate AST
+ *  nesting (the parser caps nesting far lower) so it only trips on a cycle. */
+#define SEMA_RESOLVE_MAX_DEPTH 512u
+
+/** @brief Max recursion depth of check_conformance when climbing inherited
+ *  protocols (`protocol A: B`), guarding against an inheritance cycle
+ *  (`A: B`, `B: A`).  Real protocol inheritance never nests near this. */
+#define SEMA_CONFORMANCE_MAX_DEPTH 64u
 
 /** @brief Initial intern hash-table capacity (grows on demand; must be a
  *  power of 2). */

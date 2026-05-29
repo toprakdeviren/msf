@@ -30,6 +30,19 @@ static void test_single_identifier(void) {
   TEST_PASS();
 }
 
+static void test_escaped_keyword_identifier(void) {
+  TEST("escaped keyword identifier: `default`");
+  Source src; TokenStream ts;
+  test_tokenize("`default`", &src, &ts);
+  ASSERT(ts.count >= 2);
+  ASSERT_EQ(ts.tokens[0].type, TOK_IDENTIFIER);
+  ASSERT_EQ(ts.tokens[0].len, 7);
+  ASSERT_EQ(memcmp(src.data + ts.tokens[0].pos, "default", 7), 0);
+  ASSERT_EQ(ts.tokens[ts.count - 1].type, TOK_EOF);
+  token_stream_free(&ts);
+  TEST_PASS();
+}
+
 static void test_keyword_recognition(void) {
   TEST("keywords: func var let class struct");
   Source src; TokenStream ts;
@@ -60,6 +73,21 @@ static void test_multi_char_operators(void) {
   ASSERT_EQ(ts.tokens[1].op_kind, OP_NEQ);
   ASSERT_EQ(ts.tokens[2].op_kind, OP_ARROW);
   ASSERT_EQ(ts.tokens[3].op_kind, OP_NIL_COAL);
+  token_stream_free(&ts);
+  TEST_PASS();
+}
+
+static void test_force_optional_member_tokens(void) {
+  TEST("postfix !. and ?. stay split for member access");
+  Source src; TokenStream ts;
+  test_tokenize("a!.b a?.b", &src, &ts);
+  for (size_t i = 0; i < ts.count; i++) {
+    if (ts.tokens[i].type == TOK_OPERATOR && ts.tokens[i].len == 2) {
+      const char *text = src.data + ts.tokens[i].pos;
+      ASSERT(!(text[0] == '!' && text[1] == '.'));
+      ASSERT(!(text[0] == '?' && text[1] == '.'));
+    }
+  }
   token_stream_free(&ts);
   TEST_PASS();
 }
@@ -205,8 +233,10 @@ void run_lexer_tests(void) {
   TEST_SUITE("Lexer");
   test_empty_source();
   test_single_identifier();
+  test_escaped_keyword_identifier();
   test_keyword_recognition();
   test_multi_char_operators();
+  test_force_optional_member_tokens();
   test_range_operators();
   test_integer_literals();
   test_float_literal();

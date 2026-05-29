@@ -27,6 +27,13 @@ static int p_is_colon(const Parser *p) {
   return 0;
 }
 
+static int p_is_operator_name_part(const Parser *p) {
+  if (p_is_eof(p) || p_is_colon(p)) return 0;
+  const Token *t = p_tok(p);
+  if (t->type == TOK_OPERATOR) return 1;
+  return t->type == TOK_PUNCT && p->src->data[t->pos] == '.';
+}
+
 /** @brief Skips to the next attribute boundary (';' or '}' or newline).
  *  has_leading_newline on the NEXT token marks the line break — the lexer
  *  filters TOK_NEWLINE itself but preserves the flag. */
@@ -152,8 +159,13 @@ ASTNode *parse_operator_decl(Parser *p, int is_infix) {
   ASTNode *node = alloc_node(p, AST_OPERATOR_DECL);
   if (!node) return NULL;
   node->data.var.name_tok = (uint32_t)p->pos;
-  if (p_tok(p)->type == TOK_IDENTIFIER || p_tok(p)->type == TOK_OPERATOR)
+  if (p_tok(p)->type == TOK_IDENTIFIER)
     adv(p);
+  else if (p_is_operator_name_part(p)) {
+    adv(p);
+    while (p_is_operator_name_part(p) && !p_tok(p)->has_leading_newline)
+      adv(p);
+  }
   if (is_infix && !p_is_eof(p) && p_is_colon(p)) {
     adv(p);
     ASTNode *ref = alloc_node(p, AST_PG_GROUP_REF);

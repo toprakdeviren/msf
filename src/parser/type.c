@@ -11,20 +11,56 @@
  * Type Attribute & Prefix Helpers
  * ═══════════════════════════════════════════════════════════════════════════════ */
 
-/** @brief Consumes @escaping, @autoclosure, @Sendable, etc. Returns modifier flags. */
+/** @brief Consumes @escaping, @autoclosure, @Sendable, @convention(c), etc.
+ *  Returns modifier flags. */
 static uint32_t consume_type_attributes(Parser *p) {
   uint32_t mods = 0;
   while (!p_is_eof(p) && p_tok(p)->type == TOK_OPERATOR &&
          p->src->data[p_tok(p)->pos] == '@') {
     adv(p);
-    if (p_tok(p)->type == TOK_IDENTIFIER) {
+    uint32_t name_end = 0;
+    if (p_tok(p)->type == TOK_IDENTIFIER || p_tok(p)->type == TOK_KEYWORD) {
       if (p_is_ident_str(p, CK_ESCAPING))         mods |= MOD_ESCAPING;
       else if (p_is_ident_str(p, CK_AUTOCLOSURE)) mods |= MOD_AUTOCLOSURE;
       else if (p_is_ident_str(p, "Sendable"))     mods |= MOD_SENDABLE;
+      name_end = p_tok(p)->pos + p_tok(p)->len;
       adv(p);
+    }
+    /* Skip a balanced argument list ONLY when it abuts the attribute name with
+     * no whitespace (call syntax): @convention(c), @convention(c, cType:
+     * "..."), @_specialize(...).  Without this the '(...)' was mistaken for the
+     * type itself, derailing `@convention(c) (Any, Any) -> Int`.  But a '(' with
+     * a gap before it is NOT an argument — it is the parameter list of a
+     * following function type, as in `@Sendable () -> Void` or `@escaping (Int)
+     * -> Void`; consuming it there would derail the type.  Parens inside a
+     * string-literal argument are one STRING_LIT token, so depth stays sound. */
+    if (P_LPAREN(p) && name_end && p_tok(p)->pos == name_end) {
+      int depth = 0;
+      do {
+        if (P_LPAREN(p)) depth++;
+        else if (P_RPAREN(p)) depth--;
+        adv(p);
+      } while (!p_is_eof(p) && depth > 0);
     }
   }
   return mods;
+}
+
+static int is_type_ownership_modifier(Parser *p) {
+  if (p_tok(p)->type == TOK_KEYWORD) {
+    return p_tok(p)->keyword == KW_BORROWING ||
+           p_tok(p)->keyword == KW_CONSUMING;
+  }
+  /* `isolated` (`actor: isolated (any Actor)?`) and `sending` (`_ x: sending T`,
+   * `-> sending U`, Swift 6 region isolation) are parameter/result-position type
+   * modifiers; like inout/borrowing they are transparent to the type's shape. */
+  return p_is_ident_str(p, "__owned") || p_is_ident_str(p, "isolated") ||
+         p_is_ident_str(p, "sending");
+}
+
+static void consume_type_ownership_modifiers(Parser *p) {
+  while (!p_is_eof(p) && is_type_ownership_modifier(p))
+    adv(p);
 }
 
 /** @brief Parses `inout T` → AST_TYPE_INOUT wrapping the base type. */
@@ -97,11 +133,23 @@ static void parse_type_array_or_dict(Parser *p, ASTNode *node) {
  * ═══════════════════════════════════════════════════════════════════════════════ */
 
 /** @brief Returns 1 if the next token is ':' (PUNCT or single-char OPERATOR). */
-static int next_is_colon(const Parser *p) {
-  if (p->pos + 1 >= p->ts->count) return 0;
-  const Token *nt = &p->ts->tokens[p->pos + 1];
+static int token_is_colon_at(const Parser *p, size_t pos) {
+  if (pos >= p->ts->count) return 0;
+  const Token *nt = &p->ts->tokens[pos];
   return (nt->type == TOK_PUNCT && p->src->data[nt->pos] == ':') ||
          (nt->type == TOK_OPERATOR && nt->len == 1 && p->src->data[nt->pos] == ':');
+}
+
+static int next_is_colon(const Parser *p) {
+  return token_is_colon_at(p, p->pos + 1);
+}
+
+static int token_is_param_label_at(const Parser *p, size_t pos) {
+  if (pos >= p->ts->count) return 0;
+  const Token *t = &p->ts->tokens[pos];
+  if (t->type == TOK_IDENTIFIER || t->type == TOK_KEYWORD)
+    return 1;
+  return t->type == TOK_OPERATOR && t->len == 1 && p->src->data[t->pos] == '_';
 }
 
 /** @brief Parses one tuple element: [label :] Type */
@@ -110,8 +158,17 @@ static ASTNode *parse_tuple_element(Parser *p) {
   if (!elem) return NULL;
   elem->data.var.name_tok = 0;
 
+  /* Function types allow external + local labels: `(_ progress: T) -> U`. */
+  if (token_is_param_label_at(p, p->pos) &&
+      token_is_param_label_at(p, p->pos + 1) &&
+      token_is_colon_at(p, p->pos + 2)) {
+    elem->data.var.name_tok = (uint32_t)(p->pos + 1);
+    adv(p); /* external label */
+    adv(p); /* local name */
+    adv(p); /* ':' */
+  }
   /* Detect `label:` */
-  if (p_tok(p)->type == TOK_IDENTIFIER && next_is_colon(p)) {
+  else if (token_is_param_label_at(p, p->pos) && next_is_colon(p)) {
     elem->data.var.name_tok = (uint32_t)p->pos;
     adv(p); /* label */
     adv(p); /* ':' */
@@ -158,6 +215,58 @@ static void parse_type_tuple_or_func(Parser *p, ASTNode *node) {
  * Named / Generic / Qualified Type: Foo, Foo<T>, Module.Type, T.Item
  * ═══════════════════════════════════════════════════════════════════════════════ */
 
+/**
+ * @brief Consumes a trailing member/metatype suffix on @p node: `.Member`,
+ *        `.Type`, `.Protocol` (each with optional generic args).
+ *
+ * Applies after named, parenthesized, and bracketed types alike, so a metatype
+ * like `(any P & Q).Type` or `[Int].Type` is parsed instead of stranding the
+ * `.Type` and derailing the enclosing list.
+ */
+/** @brief Consumes one '>' closing a generic argument list.  A `>>`, `>>>`,
+ *  `>=`, or `>>=` token is split in place (peel one '>', keep the rest) so an
+ *  enclosing generic still sees its own closer — the classic nested-generic
+ *  problem: `Foo<C, Bar<Text, Image>>` followed by `, C : View` derailed because
+ *  the inner close ate the whole `>>` and the outer list mis-read `, C`.  The
+ *  pointed-to Token is mutable through the const stream; the leftover token's
+ *  col is then ~1 off, which only affects diagnostics on that '>' itself.
+ *  Caller has checked cur_char(p) == '>'. */
+static void parse_close_angle(Parser *p) {
+  if (p_is_eof(p)) return;
+  Token *t = &p->ts->tokens[p->pos];
+  if (t->len > 1) { t->pos += 1; t->len -= 1; }  /* keep the remaining '>' */
+  else adv(p);
+}
+
+static void parse_type_member_suffix(Parser *p, ASTNode *node) {
+  while (p_is_punct(p, '.') ||
+         (p_tok(p)->type == TOK_OPERATOR && p_tok(p)->len == 1 &&
+          p->src->data[p_tok(p)->pos] == '.')) {
+    adv(p);
+    if (p_tok(p)->type == TOK_IDENTIFIER) {
+      ASTNode *member = alloc_node(p, AST_TYPE_IDENT);
+      if (!member) return;
+      member->tok_idx = (uint32_t)p->pos;
+      adv(p);
+      /* Generic args on a member segment: A.B<Int>, A.B.C<T>, A.B<T>.C */
+      if (!p_is_eof(p) && cur_char(p) == '<' &&
+          p_tok(p)->type == TOK_OPERATOR && p_tok(p)->len == 1) {
+        member->kind = AST_TYPE_GENERIC;
+        adv(p); /* '<' */
+        while (!p_is_eof(p) && cur_char(p) != '>') {
+          ASTNode *arg = parse_type(p);
+          if (arg) ast_add_child(member, arg);
+          if (P_COMMA(p)) adv(p); else break;
+        }
+        if (!p_is_eof(p) && cur_char(p) == '>') parse_close_angle(p);
+      }
+      ast_add_child(node, member);
+    } else {
+      break; /* `.` not followed by a member name — leave it for the caller */
+    }
+  }
+}
+
 /** @brief Parses a named type with optional generic args and qualified suffix. */
 static void parse_type_named(Parser *p, ASTNode *node) {
   node->tok_idx = (uint32_t)p->pos;
@@ -173,20 +282,11 @@ static void parse_type_named(Parser *p, ASTNode *node) {
       if (arg) ast_add_child(node, arg);
       if (P_COMMA(p)) adv(p); else break;
     }
-    if (!p_is_eof(p) && cur_char(p) == '>') adv(p);
+    if (!p_is_eof(p) && cur_char(p) == '>') parse_close_angle(p);
   }
 
-  /* Qualified: Module.Type or T.Item */
-  while (p_is_punct(p, '.')) {
-    adv(p);
-    if (p_tok(p)->type == TOK_IDENTIFIER) {
-      ASTNode *member = alloc_node(p, AST_TYPE_IDENT);
-      if (!member) return;
-      member->tok_idx = (uint32_t)p->pos;
-      adv(p);
-      ast_add_child(node, member);
-    }
-  }
+  /* Qualified / metatype suffix: Module.Type, T.Item, X.Type, X.Protocol */
+  parse_type_member_suffix(p, node);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════════
@@ -213,7 +313,8 @@ static ASTNode *wrap_composition(Parser *p, ASTNode *node) {
 /** @brief Wraps node in AST_TYPE_OPTIONAL if followed by '?' or '!'. */
 static ASTNode *wrap_optional(Parser *p, ASTNode *node) {
   if (p_is_eof(p)) return node;
-  char c = p->src->data[p_tok(p)->pos];
+  Token *t = &p->ts->tokens[p->pos];
+  char c = p->src->data[t->pos];
   if (c != '?' && c != '!') return node;
 
   ASTNode *inner = node;
@@ -222,7 +323,14 @@ static ASTNode *wrap_optional(Parser *p, ASTNode *node) {
   if (!node) return inner;
   node->tok_idx = inner->tok_idx;
   ast_add_child(node, inner);
-  adv(p);
+  /* The optional marker may be glued to a following '>' that closes an
+   * enclosing generic, lexed as one operator token: `Foo<Bar?>` tokenizes the
+   * tail as `?>`.  Peel only the leading '?'/'!' char and keep the rest of the
+   * token so the generic argument list still sees its closing '>' (same in-place
+   * split parse_close_angle does for `>>`).  Otherwise the '>' is consumed here,
+   * the '<' never closes, and the next parameter is swallowed as a generic arg. */
+  if (t->len > 1) { t->pos += 1; t->len -= 1; }
+  else adv(p);
   return node;
 }
 
@@ -255,12 +363,50 @@ static ASTNode *parse_type_inner(Parser *p) {
   ASTNode *node = alloc_node(p, AST_TYPE_IDENT);
   if (!node) return NULL;
 
-  /* Type attributes: @escaping, @autoclosure */
-  node->modifiers |= consume_type_attributes(p);
+  /* Leading type-position modifiers can appear in any order/combination:
+   * @escaping/@Sendable/@convention(c) attributes, borrowing/consuming/isolated/
+   * sending/__owned ownership, repeat/each (parameter packs), and
+   * nonisolated(nonsending).  Loop until none match — e.g. `sending @escaping ()
+   * async -> T` puts ownership before the attribute, and `repeat each T` chains
+   * two markers.  All are transparent to the type's shape here. */
+  for (;;) {
+    size_t before = p->pos;
+    node->modifiers |= consume_type_attributes(p);
+    consume_type_ownership_modifiers(p);
+    if (p_is_kw(p, KW_REPEAT)) adv(p);
+    if (p_is_ident_str(p, "each")) adv(p);
+    /* nonisolated(nonsending) — a function-type isolation modifier.  Require an
+     * argument clause so a bare type named `nonisolated` (if any) is untouched. */
+    if (p_is_ident_str(p, "nonisolated") && p->pos + 1 < p->ts->count &&
+        p->ts->tokens[p->pos + 1].type == TOK_PUNCT &&
+        p->src->data[p->ts->tokens[p->pos + 1].pos] == '(') {
+      adv(p); /* nonisolated */
+      int depth = 0;
+      do {
+        if (P_LPAREN(p)) depth++;
+        else if (P_RPAREN(p)) depth--;
+        adv(p);
+      } while (!p_is_eof(p) && depth > 0);
+    }
+    if (p->pos == before) break;
+  }
 
-  /* some T / any T */
-  if (p_is_kw(p, KW_SOME))      { node->kind = AST_TYPE_SOME; adv(p); }
-  else if (p_is_kw(p, KW_ANY))  { node->kind = AST_TYPE_ANY;  adv(p); }
+  /* Suppressed/inverse conformance marker: ~Copyable, ~Escapable.  Transparent
+   * to the type's shape — we record it and parse the underlying protocol.
+   * Without this, a '~' starting a (possibly parenthesized) type element fell
+   * through to error recovery and stranded the protocol name, derailing the
+   * enclosing tuple/parameter list — e.g. `(any (~Copyable & ~Escapable).Type)?`. */
+  if (p_tok(p)->type == TOK_OPERATOR && p_tok(p)->len == 1 &&
+      p->src->data[p_tok(p)->pos] == '~') {
+    adv(p);
+    node->modifiers |= MOD_SUPPRESSED_CONFORMANCE;
+  }
+
+  /* some T / any T — `some`/`any` are contextual keywords (lexed as
+   * identifiers so they work as names elsewhere), so match the preserved
+   * keyword id rather than the token type. Only fires at a type start. */
+  if (p_tok(p)->keyword == KW_SOME)      { node->kind = AST_TYPE_SOME; adv(p); }
+  else if (p_tok(p)->keyword == KW_ANY)  { node->kind = AST_TYPE_ANY;  adv(p); }
 
   /* inout T */
   if (p_is_ident_str(p, CK_INOUT))
@@ -269,6 +415,7 @@ static ASTNode *parse_type_inner(Parser *p) {
   /* [T], [K: V], [N of T] */
   if (P_LBRACK(p)) {
     parse_type_array_or_dict(p, node);
+    parse_type_member_suffix(p, node); /* [Int].Type */
     node = wrap_composition(p, node);
     node = wrap_optional(p, node);
     node->tok_end = (uint32_t)p->pos;
@@ -278,6 +425,9 @@ static ASTNode *parse_type_inner(Parser *p) {
   /* (T, U) or (T) -> U */
   if (P_LPAREN(p)) {
     parse_type_tuple_or_func(p, node);
+    parse_type_member_suffix(p, node); /* (any P & Q).Type, (A, B).Type */
+    node = wrap_composition(p, node);
+    node = wrap_optional(p, node);
     node->tok_end = (uint32_t)p->pos;
     return node;
   }
@@ -332,15 +482,25 @@ void parse_params(Parser *p, ASTNode *parent) {
     ASTNode *param = alloc_node(p, AST_PARAM);
     if (!param) return;
 
+    /* Attributes before the label: @ViewBuilder and other result-builder /
+     * custom parameter attributes.  (@escaping/@autoclosure written on the type
+     * itself are handled by parse_type.) */
+    param->modifiers |= consume_type_attributes(p);
+
     try_consume_ownership(p, param);
 
     /* External label (or sole name) */
     uint32_t ext_tok = 0;
     int has_ext = 0;
+    int ext_is_uscore = 0;
     if (p_tok(p)->type == TOK_IDENTIFIER || p_tok(p)->type == TOK_KEYWORD ||
         (p_tok(p)->type == TOK_OPERATOR && p->src->data[p_tok(p)->pos] == '_')) {
       ext_tok = (uint32_t)p->pos;
       has_ext = 1;
+      /* `_` (no argument label) may lex as either an operator or an identifier;
+       * detect it by the source text, not the token kind. */
+      ext_is_uscore =
+          (p_tok(p)->len == 1 && p->src->data[p_tok(p)->pos] == '_');
       adv(p);
     }
 
@@ -351,6 +511,13 @@ void parse_params(Parser *p, ASTNode *parent) {
     } else if (has_ext) {
       param->data.var.name_tok = ext_tok;
     }
+
+    /* Argument label: the external label (or sole name) names the param at call
+     * sites; `_` means no label.  Stored so overload mangling can distinguish
+     * methods that differ ONLY by label (e.g. the UITableView delegate's many
+     * `tableView(_:numberOfRowsInSection:)`/`tableView(_:cellForRowAt:)`). */
+    if (has_ext && !ext_is_uscore)
+      param->arg_label_tok = ext_tok;
 
     /* : Type */
     if (P_COLON(p)) {
@@ -370,6 +537,19 @@ void parse_params(Parser *p, ASTNode *parent) {
       adv(p);
       ASTNode *def = parse_expr_pratt(p, 0);
       if (def) ast_add_child(param, def);
+      /* Recover from default-value expressions the Pratt parser doesn't fully
+       * consume — if/switch-expression defaults, IIFE closures `{ … }()`,
+       * multiline calls `= Foo(\n a: …,\n b: …)`.  Balance-skip any remainder up
+       * to the next top-level ',' or ')'.  A no-op when the expression was fully
+       * consumed (we are already at the delimiter). */
+      int d = 0;
+      while (!p_is_eof(p)) {
+        char ch = p->src->data[p_tok(p)->pos];
+        if (d == 0 && (ch == ',' || ch == ')')) break;
+        if (ch == '(' || ch == '[' || ch == '{') d++;
+        else if (ch == ')' || ch == ']' || ch == '}') d--;
+        adv(p);
+      }
     }
 
     param->tok_end = (uint32_t)p->pos;
@@ -412,6 +592,12 @@ void parse_generic_params(Parser *p, ASTNode *parent) {
   adv(p);
 
   while (!p_is_eof(p) && cur_char(p) != '>') {
+    int value_param = 0;
+    if (p_is_kw(p, KW_LET) || p_is_kw(p, KW_VAR)) {
+      value_param = 1;
+      adv(p);
+    }
+    if (p_is_ident_str(p, "each")) adv(p); /* <each T> — pack type parameter */
     if (p_tok(p)->type != TOK_IDENTIFIER) break;
 
     ASTNode *gp = alloc_node(p, AST_GENERIC_PARAM);
@@ -421,15 +607,22 @@ void parse_generic_params(Parser *p, ASTNode *parent) {
 
     if (P_COLON(p)) {
       adv(p);
-      while (!p_is_eof(p)) {
-        int suppressed = 0;
-        if (p_tok(p)->type == TOK_OPERATOR && p_tok(p)->len == 1 &&
-            p->src->data[p_tok(p)->pos] == '~') { suppressed = 1; adv(p); }
-        ASTNode *ct = parse_type(p);
-        if (ct) { int sf = suppressed; add_generic_constraint_nodes(p, gp, ct, &sf); }
-        if (!p_is_eof(p) && cur_char(p) == '&' &&
-            p_tok(p)->type == TOK_OPERATOR && p_tok(p)->len == 1) { adv(p); continue; }
-        break;
+      if (value_param) {
+        /* Swift interface const generics use `<let count: Int>`. msf does not
+         * model value generic parameters yet, but the parser must consume the
+         * annotation so the enclosing declaration recovers correctly. */
+        parse_type(p);
+      } else {
+        while (!p_is_eof(p)) {
+          int suppressed = 0;
+          if (p_tok(p)->type == TOK_OPERATOR && p_tok(p)->len == 1 &&
+              p->src->data[p_tok(p)->pos] == '~') { suppressed = 1; adv(p); }
+          ASTNode *ct = parse_type(p);
+          if (ct) { int sf = suppressed; add_generic_constraint_nodes(p, gp, ct, &sf); }
+          if (!p_is_eof(p) && cur_char(p) == '&' &&
+              p_tok(p)->type == TOK_OPERATOR && p_tok(p)->len == 1) { adv(p); continue; }
+          break;
+        }
       }
     }
 
@@ -437,12 +630,18 @@ void parse_generic_params(Parser *p, ASTNode *parent) {
     ast_add_child(parent, gp);
     if (P_COMMA(p)) adv(p); else break;
   }
-  if (!p_is_eof(p) && cur_char(p) == '>') adv(p);
+  if (!p_is_eof(p) && cur_char(p) == '>') parse_close_angle(p);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════════
  * Where Clause & Inheritance Clause
  * ═══════════════════════════════════════════════════════════════════════════════ */
+
+static void parse_suppressed_conformance_prefix(Parser *p) {
+  if (!p_is_eof(p) && p_tok(p)->type == TOK_OPERATOR && p_tok(p)->len == 1 &&
+      p->src->data[p_tok(p)->pos] == '~')
+    adv(p);
+}
 
 /** @brief Parses: where T: Equatable, U == Int */
 ASTNode *parse_where_clause(Parser *p) {
@@ -473,6 +672,7 @@ ASTNode *parse_where_clause(Parser *p) {
       continue;
     }
 
+    parse_suppressed_conformance_prefix(p);
     ASTNode *rhs = parse_type(p);
     ast_add_child(req, lhs);
     if (rhs) ast_add_child(req, rhs);
@@ -494,6 +694,16 @@ ASTNode *parse_inheritance_clause(Parser *p) {
   if (!conf) return NULL;
 
   while (!p_is_eof(p) && !P_LBRACE(p) && !p_is_kw(p, KW_WHERE)) {
+    parse_suppressed_conformance_prefix(p);
+    /* Legacy class-bound protocol constraint: `protocol P: class` is the
+     * pre-Swift-5 spelling of `: AnyObject`.  Here `class` is a constraint
+     * marker, not a type — consume it so it isn't misparsed as a type and
+     * later reported as `use of undeclared type 'class'`. */
+    if (p_is_kw(p, KW_CLASS)) {
+      adv(p);
+      if (P_COMMA(p)) { adv(p); continue; }
+      break;
+    }
     ASTNode *entry = parse_type(p);
     if (entry) ast_add_child(conf, entry);
     if (P_COMMA(p)) adv(p); else break;
@@ -526,7 +736,8 @@ static ASTNode *parse_proto_func_req(Parser *p, uint32_t mods) {
   req->tok_idx = (uint32_t)p->pos;
   req->modifiers = mods | PROTO_REQ_IS_FUNC;
 
-  if (p_tok(p)->type == TOK_IDENTIFIER || p_tok(p)->type == TOK_OPERATOR)
+  if (p_tok(p)->type == TOK_IDENTIFIER || p_tok(p)->type == TOK_OPERATOR ||
+      p_tok(p)->type == TOK_KEYWORD)
     adv(p);
   if (!p_is_eof(p) && cur_char(p) == '<')
     parse_generic_params(p, req);
@@ -560,7 +771,7 @@ static ASTNode *parse_proto_var_req(Parser *p, uint32_t mods) {
   req->tok_idx = (uint32_t)p->pos;
   req->modifiers = mods;
 
-  if (p_tok(p)->type == TOK_IDENTIFIER) adv(p);
+  if (p_tok(p)->type == TOK_IDENTIFIER || p_tok(p)->type == TOK_KEYWORD) adv(p);
   if (P_COLON(p)) {
     adv(p);
     ASTNode *tn = parse_type(p);
@@ -608,6 +819,12 @@ static ASTNode *parse_proto_subscript_req(Parser *p, uint32_t mods) {
     adv(p);
     ASTNode *ret = parse_type(p);
     if (ret) ast_add_child(req, ret);
+  }
+  /* where clause: subscript<R>(b: R) -> T where R : RangeExpression (func/init
+   * requirements parse this too; the subscript requirement was missing it). */
+  if (p_is_kw(p, KW_WHERE)) {
+    ASTNode *wc = parse_where_clause(p);
+    if (wc) ast_add_child(req, wc);
   }
   /* Accessor block: { get [set] } — same shape as var requirement. */
   if (P_LBRACE(p)) {

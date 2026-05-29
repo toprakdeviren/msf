@@ -168,8 +168,26 @@ ASTNode *parse_var_decl(Parser *p, int is_let, uint32_t mods) {
     node->data.var.is_class_var = 1;
     p->class_var_flag = 0;
   }
+  if (P_LPAREN(p)) {
+    ASTNode *pattern = parse_binding_tuple_pattern(p, !is_let);
+    if (pattern) {
+      node->data.var.name_tok = pattern->tok_idx;
+      ast_add_child(node, pattern);
+    }
+
+    if (!p_is_eof(p) && p->src->data[p_tok(p)->pos] == '=') {
+      adv(p);
+      ASTNode *init = parse_expr_pratt(p, 0);
+      if (init)
+        ast_add_child(node, init);
+    }
+    node->tok_end = (uint32_t)p->pos;
+    return node;
+  }
+  /* Name — identifier or a keyword used as a name (`var lazy`, `var package`,
+   * `var `default``).  Swift permits many keywords in property-name position. */
   node->data.var.name_tok = (uint32_t)p->pos;
-  if (p_tok(p)->type == TOK_IDENTIFIER)
+  if (p_tok(p)->type == TOK_IDENTIFIER || p_tok(p)->type == TOK_KEYWORD)
     adv(p);
 
   /* : Type */

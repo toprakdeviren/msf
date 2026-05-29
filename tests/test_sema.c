@@ -18,6 +18,16 @@ typedef struct {
   ASTNode *root;
 } TestPipeline;
 
+typedef struct {
+  Source src[2];
+  TokenStream ts[2];
+  ASTArena ast_arena;
+  TypeArena type_arena;
+  Parser *parser[2];
+  SemaContext *sema;
+  ASTNode *root[2];
+} TestModulePipeline;
+
 static int pipeline_run(TestPipeline *tp, const char *code) {
   tp->src.data = code;
   tp->src.len = strlen(code);
@@ -37,12 +47,58 @@ static int pipeline_run(TestPipeline *tp, const char *code) {
   return sema_analyze(tp->sema, tp->root);
 }
 
+static int module_pipeline_run2(TestModulePipeline *mp, const char *code0,
+                                const char *code1) {
+  const char *codes[2] = {code0, code1};
+  const char *names[2] = {"Protocol.swift", "Impl.swift"};
+
+  ast_arena_init(&mp->ast_arena, 0);
+  for (int i = 0; i < 2; i++) {
+    mp->src[i].data = codes[i];
+    mp->src[i].len = strlen(codes[i]);
+    mp->src[i].filename = names[i];
+
+    token_stream_init(&mp->ts[i], 256);
+    lexer_tokenize(&mp->src[i], &mp->ts[i], 1, NULL);
+
+    mp->parser[i] = parser_init(&mp->src[i], &mp->ts[i], &mp->ast_arena);
+    mp->root[i] = parse_source_file(mp->parser[i]);
+  }
+
+  type_arena_init(&mp->type_arena, 0);
+  type_builtins_init(&mp->type_arena);
+  mp->sema = sema_init(&mp->src[0], mp->ts[0].tokens, &mp->ast_arena,
+                       &mp->type_arena);
+
+  SemaModuleFile files[2] = {
+      {.src = &mp->src[0],
+       .tokens = mp->ts[0].tokens,
+       .token_count = (uint32_t)mp->ts[0].count,
+       .root = mp->root[0]},
+      {.src = &mp->src[1],
+       .tokens = mp->ts[1].tokens,
+       .token_count = (uint32_t)mp->ts[1].count,
+       .root = mp->root[1]},
+  };
+  return sema_analyze_module(mp->sema, files, 2);
+}
+
 static void pipeline_free(TestPipeline *tp) {
   sema_destroy(tp->sema);
   parser_destroy(tp->parser);
   type_arena_free(&tp->type_arena);
   ast_arena_free(&tp->ast_arena);
   token_stream_free(&tp->ts);
+}
+
+static void module_pipeline_free(TestModulePipeline *mp) {
+  sema_destroy(mp->sema);
+  parser_destroy(mp->parser[0]);
+  parser_destroy(mp->parser[1]);
+  type_arena_free(&mp->type_arena);
+  ast_arena_free(&mp->ast_arena);
+  token_stream_free(&mp->ts[0]);
+  token_stream_free(&mp->ts[1]);
 }
 
 /* Find first descendant of given kind (BFS-ish, depth-first actually) */
@@ -55,6 +111,9 @@ static const ASTNode *find_desc(const ASTNode *node, ASTNodeKind kind) {
   }
   return NULL;
 }
+
+static int has_error_with(SemaContext *s, const char *a, const char *b,
+                          const char *c);
 
 /* ── Basic type resolution ────────────────────────────────────────────────── */
 
@@ -306,6 +365,375 @@ static void test_sema_no_errors_clean_code(void) {
   TEST_PASS();
 }
 
+static void test_sema_extension_static_stored_property_ok(void) {
+  TEST("extension static stored property → no stored-property diagnostic");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "struct Foo {}\n"
+               "extension Foo { static let answer: Int = 42 }");
+  ASSERT(!has_error_with(tp.sema,
+                         "extensions must not contain stored properties",
+                         NULL, NULL));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_extension_escaped_static_computed_property_ok(void) {
+  TEST("extension escaped static computed property → no stored-property diagnostic");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "struct Foo {}\n"
+               "extension Foo { static var `default`: Int { return 1 } }");
+  ASSERT(!has_error_with(tp.sema,
+                         "extensions must not contain stored properties",
+                         NULL, NULL));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_extension_computed_parenthesized_optional_type_ok(void) {
+  TEST("extension computed property with parenthesized optional type → no stored-property diagnostic");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "protocol Error {}\n"
+               "struct Foo {}\n"
+               "extension Foo { var underlyingError: (any Error)? { return nil } }");
+  ASSERT(!has_error_with(tp.sema,
+                         "extensions must not contain stored properties",
+                         NULL, NULL));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_extension_instance_stored_property_rejected(void) {
+  TEST("extension instance stored property → diagnostic");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "struct Foo {}\n"
+               "extension Foo { var answer: Int = 42 }");
+  ASSERT(has_error_with(tp.sema,
+                        "extensions must not contain stored properties",
+                        NULL, NULL));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_extension_method_local_var_ok(void) {
+  TEST("extension method local var → no stored-property diagnostic");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "struct Foo {}\n"
+               "extension Foo { func f() { let value: Int = 1 } }");
+  ASSERT(!has_error_with(tp.sema,
+                         "extensions must not contain stored properties",
+                         NULL, NULL));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_property_method_same_name_ok(void) {
+  TEST("property and method with same base name → no redefinition");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "struct Encoder {\n"
+               "  static var urlEncodedForm: Int { return 1 }\n"
+               "  static func urlEncodedForm(destination: Int) -> Int { return destination }\n"
+               "}");
+  ASSERT(!has_error_with(tp.sema, "Redefinition of 'urlEncodedForm'",
+                         NULL, NULL));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_duplicate_property_same_name_rejected(void) {
+  TEST("duplicate properties with same name → redefinition");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "struct Encoder {\n"
+               "  static var urlEncodedForm: Int { return 1 }\n"
+               "  static var urlEncodedForm: Int { return 2 }\n"
+               "}");
+  ASSERT(has_error_with(tp.sema, "Redefinition of 'urlEncodedForm'",
+                        NULL, NULL));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_static_and_instance_property_same_name_ok(void) {
+  TEST("static and instance property may share a base name");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "struct Bitmap {\n"
+               "  static var capacity: Int { return 64 }\n"
+               "  var capacity: Int { return 64 }\n"
+               "}\n"
+               "protocol Extended {\n"
+               "  static var af: Int { get }\n"
+               "  var af: Int { get }\n"
+               "}");
+  ASSERT(!has_error_with(tp.sema, "Redefinition of 'capacity'", NULL, NULL));
+  ASSERT(!has_error_with(tp.sema, "Redefinition of 'af'", NULL, NULL));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_switch_case_local_reuse_ok(void) {
+  TEST("switch case local names are scoped per arm");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "func f(x: Int) -> Int {\n"
+               "  switch x {\n"
+               "  case 0:\n"
+               "    let cell: Int = 1\n"
+               "    return cell\n"
+               "  default:\n"
+               "    let cell: Int = 2\n"
+               "    return cell\n"
+               "  }\n"
+               "}");
+  ASSERT(!has_error_with(tp.sema, "Redefinition of 'cell'", NULL, NULL));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_nominal_generic_param_visible_in_members(void) {
+  TEST("generic type parameter visible in member signatures");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "struct Box<Element> {\n"
+               "  var value: Element\n"
+               "  func get(_ fallback: Element) -> Element { return fallback }\n"
+               "}");
+  ASSERT(!has_error_with(tp.sema, "undeclared type 'Element'", NULL, NULL));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_extension_typealias_visible_in_members(void) {
+  TEST("extension typealias visible in member signatures");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "struct Pair<Base> {}\n"
+               "extension Pair {\n"
+               "  typealias Element = Base\n"
+               "  func next() -> Element? { return nil }\n"
+               "}");
+  ASSERT(!has_error_with(tp.sema, "undeclared type 'Element'", NULL, NULL));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_extension_typealias_visible_across_extensions(void) {
+  TEST("extension typealias visible across extensions");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "struct Pair<Base> {}\n"
+               "extension Pair { typealias Element = Base }\n"
+               "extension Pair {\n"
+               "  func value(_ element: Element) -> Element { return element }\n"
+               "}");
+  ASSERT(!has_error_with(tp.sema, "undeclared type 'Element'", NULL, NULL));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_extension_nested_lookup_many_extensions(void) {
+  TEST("extension nested lookup handles many sibling extensions");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "struct Box {}\n"
+               "extension Box { struct Item {} }\n"
+               "extension Box { func f0(_ x: Item) -> Item { return x } }\n"
+               "extension Box { func f1(_ x: Item) -> Item { return x } }\n"
+               "extension Box { func f2(_ x: Item) -> Item { return x } }\n"
+               "extension Box { func f3(_ x: Item) -> Item { return x } }\n"
+               "extension Box { func f4(_ x: Item) -> Item { return x } }\n");
+  ASSERT(!has_error_with(tp.sema, "undeclared type 'Item'", NULL, NULL));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_typealias_generic_params_visible_in_rhs(void) {
+  TEST("typealias generic parameters visible in aliased type");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "public protocol Error {}\n"
+               "public struct DataStreamRequest {\n"
+               "  public struct Stream<Success, Failure: Error> {}\n"
+               "  public typealias Handler<Success, Failure: Error> = "
+               "(Stream<Success, Failure>) -> Void\n"
+               "}");
+  ASSERT(!has_error_with(tp.sema, "undeclared type 'Success'", NULL, NULL));
+  ASSERT(!has_error_with(tp.sema, "undeclared type 'Failure'", NULL, NULL));
+  ASSERT(!has_error_with(tp.sema,
+                         "type alias cannot be more visible than the type it aliases",
+                         NULL, NULL));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_function_generic_params_visible_in_return_type(void) {
+  TEST("function generic parameters visible in return type");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "public protocol Error {}\n"
+               "public enum Result<Success, Failure> {}\n"
+               "func tryMap<NewSuccess>(_ value: NewSuccess) -> "
+               "Result<NewSuccess, any Error> { return value }\n");
+  ASSERT(!has_error_with(tp.sema, "undeclared type 'NewSuccess'", NULL, NULL));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_protocol_associated_type_visible_in_requirements(void) {
+  TEST("protocol associated type visible in requirements");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "protocol Serializer {\n"
+               "  associatedtype SerializedObject\n"
+               "  func serialize() -> SerializedObject\n"
+               "}");
+  ASSERT(!has_error_with(tp.sema, "undeclared type 'SerializedObject'", NULL, NULL));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_nominal_typealias_visible_in_extension(void) {
+  TEST("nominal typealias visible in nominal and extension members");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "struct Bitmap {\n"
+               "  typealias Value = UInt32\n"
+               "  var raw: Value\n"
+               "}\n"
+               "extension Bitmap {\n"
+               "  var capacity: Value { return 0 }\n"
+               "}");
+  ASSERT(!has_error_with(tp.sema, "undeclared type 'Value'", NULL, NULL));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_nested_nominal_visible_in_member_signatures(void) {
+  TEST("nested nominal type visible in member signatures");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "struct ResponseCacher {\n"
+               "  enum Behavior { case cache }\n"
+               "  let behavior: Behavior\n"
+               "}\n"
+               "struct ChainIndex {\n"
+               "  enum Representation { case first(Int) }\n"
+               "  let position: Representation\n"
+               "}");
+  ASSERT(!has_error_with(tp.sema, "undeclared type 'Behavior'", NULL, NULL));
+  ASSERT(!has_error_with(tp.sema, "undeclared type 'Representation'", NULL, NULL));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_extension_nested_type_visible_across_extensions(void) {
+  TEST("extension nested type visible across extensions");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "struct Pair<Base> {}\n"
+               "extension Pair {\n"
+               "  struct Index { func same(_ other: Index) -> Bool { return true } }\n"
+               "}\n"
+               "extension Pair {\n"
+               "  func at(_ index: Index) -> Index { return index }\n"
+               "}");
+  ASSERT(!has_error_with(tp.sema, "undeclared type 'Index'", NULL, NULL));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_metatype_suffix_type_silenced(void) {
+  TEST("metatype .Type suffix does not report undeclared Type");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "struct ExtensionBox<Wrapped> {}\n"
+               "protocol Extended {\n"
+               "  static var box: ExtensionBox<Self>.Type { get }\n"
+               "}");
+  ASSERT(!has_error_with(tp.sema, "undeclared type 'Type'", NULL, NULL));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_generic_qualified_suffix_not_generic_arg(void) {
+  TEST("generic qualified suffix is not resolved as a generic argument");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "struct TreeDictionary<Key, Value> { struct Keys {} }\n"
+               "struct TreeSet<Element> {\n"
+               "  func formUnion<Value>(_ other: TreeDictionary<Element, Value>.Keys) {}\n"
+               "}");
+  ASSERT(!has_error_with(tp.sema, "undeclared type 'Keys'", NULL, NULL));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_public_alias_to_builtin_and_any_ok(void) {
+  TEST("public typealias may mention builtin and Any types");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "typealias Data = Any\n"
+               "public typealias Handler = (Int, Data) -> Void");
+  ASSERT(!has_error_with(tp.sema,
+                         "type alias cannot be more visible than the type it aliases",
+                         NULL, NULL));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_internal_type_can_conform_to_private_protocol(void) {
+  TEST("internal type may use same-file private protocol");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "private protocol Lock {}\n"
+               "final class UnfairLock: Lock {}");
+  ASSERT(!has_error_with(tp.sema, "less visible", "Lock", NULL));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_public_type_private_protocol_rejected(void) {
+  TEST("public type cannot expose private protocol conformance");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "private protocol Hidden {}\n"
+               "public final class PublicBox: Hidden {}");
+  ASSERT(has_error_with(tp.sema, "less visible", "Hidden", NULL));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_set_of_enum_hashable_ok(void) {
+  TEST("Set of enum type satisfies Hashable requirement");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "enum HTTPMethod { case get }\n"
+               "let methods: Set<HTTPMethod> = []");
+  ASSERT(!has_error_with(tp.sema, "Hashable", "HTTPMethod", NULL));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_set_of_erased_and_generic_hashable_ok(void) {
+  TEST("Set of erased or generic preview type skips Hashable false positive");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "func f<Subject>(_ value: Subject) {\n"
+               "  let erased: Set<Any> = []\n"
+               "  let generic: Set<Subject> = []\n"
+               "}");
+  ASSERT(!has_error_with(tp.sema, "Hashable", "Any", NULL));
+  ASSERT(!has_error_with(tp.sema, "Hashable", "Subject", NULL));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
 /* ── Protocol witness signature matching (Tier 1.1) ────────────────────── */
 
 /* Helper: returns 1 if any error message contains all of the given substrings. */
@@ -401,6 +829,35 @@ static void test_sema_witness_omitted_vs_named_label(void) {
   ASSERT(sema_error_count(tp.sema) > 0);
   ASSERT(has_error_with(tp.sema, "S", "P", "label"));
   pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_whole_module_conformance_origin_tokens(void) {
+  TEST("whole-module witness check reads protocol and impl tokens from their own files");
+  TestModulePipeline mp = {0};
+  int rc = module_pipeline_run2(
+      &mp,
+      "struct Pad00 {}\n"
+      "struct Pad01 {}\n"
+      "struct Pad02 {}\n"
+      "struct Pad03 {}\n"
+      "struct Pad04 {}\n"
+      "struct Pad05 {}\n"
+      "struct Pad06 {}\n"
+      "struct Pad07 {}\n"
+      "struct Pad08 {}\n"
+      "struct Pad09 {}\n"
+      "struct Pad10 {}\n"
+      "struct Pad11 {}\n"
+      "struct Pad12 {}\n"
+      "struct Pad13 {}\n"
+      "struct Pad14 {}\n"
+      "struct Pad15 {}\n"
+      "protocol Drawable { func draw(at p: Int) -> Int }\n",
+      "struct Circle: Drawable { func draw(at p: Int) -> Int { return p } }\n");
+  ASSERT_EQ(rc, 0);
+  ASSERT_EQ(sema_error_count(mp.sema), 0);
+  module_pipeline_free(&mp);
   TEST_PASS();
 }
 
@@ -692,6 +1149,16 @@ static void test_sema_class_explicit_sendable_with_class_member_rejected(void) {
   TEST_PASS();
 }
 
+static void test_sema_class_explicit_sendable_with_generic_member_ok(void) {
+  TEST("class : Sendable + unresolved generic stored property → no diagnostic");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "class Box<Value>: Sendable { var value: Value }\n");
+  ASSERT(!has_error_with(tp.sema, "non-Sendable", "Value", NULL));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
 static void test_sema_empty_enum_is_sendable(void) {
   TEST("enum without payload → auto Sendable");
   TestPipeline tp = {0};
@@ -736,6 +1203,20 @@ static void test_sema_generic_constraint_protocol_ok(void) {
     if (m && strstr(m, "class or protocol"))
       ASSERT(0);
   }
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_conditional_extension_generic_arg_constraint_ok(void) {
+  TEST("conditional extension constraint satisfies generic argument check");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "protocol Equatable {}\n"
+               "class Protected<Value> {}\n"
+               "extension Protected: Equatable where Value: Equatable {\n"
+               "  static func ==(lhs: Protected<Value>, rhs: Protected<Value>) -> Bool { return true }\n"
+               "}");
+  ASSERT(!has_error_with(tp.sema, "Value", "Equatable", NULL));
   pipeline_free(&tp);
   TEST_PASS();
 }
@@ -841,25 +1322,25 @@ static void test_sema_builder_nested_call_arg_closure(void) {
 /* ── Diagnostic limit overflow indicator (Tier 3.3) ──────────────────── */
 
 static void test_sema_diagnostic_overflow_indicator(void) {
-  TEST("100 errors → 64 reported, last slot says '... and N more'");
+  TEST("200 errors → all retained (diagnostics grow, no 64-cap)");
   TestPipeline tp = {0};
-  /* Build a source with 100 distinct undeclared-type usages — each fires
-   * a sema diagnostic. We expect exactly MAX_SEMA_ERRORS reports, and the
-   * last one to be the overflow message. */
-  char src[8192];
+  /* 200 distinct undeclared-type usages — each fires one sema diagnostic.
+   * Diagnostics now live in a heap array that grows on demand (cap removed),
+   * so all 200 are retained and none are truncated below SEMA_DIAG_MAX. */
+  char src[32768];
   size_t off = 0;
-  for (int i = 0; i < 100 && off < sizeof(src) - 64; i++) {
+  const int N = 200;
+  for (int i = 0; i < N && off < sizeof(src) - 64; i++) {
     int n = snprintf(src + off, sizeof(src) - off, "let x%d: Sring = \"\"\n", i);
     if (n <= 0) break;
     off += (size_t)n;
   }
   pipeline_run(&tp, src);
   uint32_t ec = sema_error_count(tp.sema);
-  ASSERT(ec >= 64);
-  ASSERT(ec <= 64);
-  const char *last = sema_error_message(tp.sema, ec - 1);
-  ASSERT_NOT_NULL(last);
-  ASSERT(strstr(last, "more diagnostics suppressed") != NULL);
+  ASSERT(ec >= (uint32_t)N); /* all retained — previously capped at 64 */
+  /* Well under the DoS ceiling, so nothing is suppressed. */
+  for (uint32_t i = 0; i < ec; i++)
+    ASSERT(strstr(sema_error_message(tp.sema, i), "more diagnostics suppressed") == NULL);
   pipeline_free(&tp);
   TEST_PASS();
 }
@@ -892,6 +1373,19 @@ static void test_sema_await_in_async_func_ok(void) {
     if (m && strstr(m, "await") && strstr(m, "async"))
       ASSERT(0);
   }
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_await_in_closure_body_ok(void) {
+  TEST("await inside closure body is treated as async closure context");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "func op() async -> Int { return 0 }\n"
+               "func work() {\n"
+               "  let f = { await op() }\n"
+               "}");
+  ASSERT(!has_error_with(tp.sema, "await", "async", NULL));
   pipeline_free(&tp);
   TEST_PASS();
 }
@@ -1049,6 +1543,40 @@ static void test_sema_plain_closure_ignores_sendable_check(void) {
   TEST_PASS();
 }
 
+static void test_sema_unannotated_closure_param_no_cycle(void) {
+  TEST("unannotated closure parameter does not self-resolve as circular");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "func f() {\n"
+               "  let mapper = { index in index }\n"
+               "}");
+  ASSERT(!has_error_with(tp.sema, "circular reference", "index", NULL));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_let_self_reference_reports_cycle(void) {
+  TEST("let x = x still reports a circular binding");
+  TestPipeline tp = {0};
+  pipeline_run(&tp, "let x = x");
+  ASSERT(has_error_with(tp.sema, "circular reference", "x", NULL));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_as_question_mark_is_optional(void) {
+  TEST("as? produces an optional result for nil coalescing");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "func f(value: Any) -> Int {\n"
+               "  let x = (value as? Int) ?? 0\n"
+               "  return x\n"
+               "}");
+  ASSERT(!has_error_with(tp.sema, "left side", "Optional type", NULL));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
 /* ── Optional binding (if let) ────────────────────────────────────────────── */
 
 static void test_sema_if_let_binding(void) {
@@ -1064,6 +1592,51 @@ static void test_sema_if_let_binding(void) {
       has_undeclared_x = 1;
   }
   ASSERT(!has_undeclared_x);
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_optional_binding_may_shadow_parameter(void) {
+  TEST("guard let x = x may shadow a parameter");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "func f(member: Int) -> Int {\n"
+               "  guard let member = member else { return 0 }\n"
+               "  return member\n"
+               "}");
+  ASSERT(!has_error_with(tp.sema, "Redefinition of 'member'", NULL, NULL));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_if_let_shadow_with_unresolved_initializer_no_cycle(void) {
+  TEST("if let x = unresolved(x) does not report a circular binding");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "func f(other: Int) -> Int {\n"
+               "  if let other = makeOptional(other) {\n"
+               "    return other\n"
+               "  }\n"
+               "  return 0\n"
+               "}");
+  ASSERT(!has_error_with(tp.sema, "circular reference", "other", NULL));
+  pipeline_free(&tp);
+  TEST_PASS();
+}
+
+static void test_sema_unowned_self_capture_does_not_redefine_self(void) {
+  TEST("[unowned self] trailing closure does not redefine self");
+  TestPipeline tp = {0};
+  pipeline_run(&tp,
+               "class Owner {\n"
+               "  func validate(_ body: (Int, Int, Int) -> Bool) {}\n"
+               "  func run() {\n"
+               "    validate { [unowned self] _, response, _ in\n"
+               "      return true\n"
+               "    }\n"
+               "  }\n"
+               "}");
+  ASSERT(!has_error_with(tp.sema, "Redefinition of 'self'", NULL, NULL));
   pipeline_free(&tp);
   TEST_PASS();
 }
@@ -1090,6 +1663,32 @@ void run_sema_tests(void) {
   test_sema_dict_type();
   test_sema_undeclared_type_error();
   test_sema_no_errors_clean_code();
+  test_sema_extension_static_stored_property_ok();
+  test_sema_extension_escaped_static_computed_property_ok();
+  test_sema_extension_computed_parenthesized_optional_type_ok();
+  test_sema_extension_instance_stored_property_rejected();
+  test_sema_extension_method_local_var_ok();
+  test_sema_property_method_same_name_ok();
+  test_sema_duplicate_property_same_name_rejected();
+  test_sema_static_and_instance_property_same_name_ok();
+  test_sema_switch_case_local_reuse_ok();
+  test_sema_nominal_generic_param_visible_in_members();
+  test_sema_extension_typealias_visible_in_members();
+  test_sema_extension_typealias_visible_across_extensions();
+  test_sema_extension_nested_lookup_many_extensions();
+  test_sema_typealias_generic_params_visible_in_rhs();
+  test_sema_function_generic_params_visible_in_return_type();
+  test_sema_protocol_associated_type_visible_in_requirements();
+  test_sema_nominal_typealias_visible_in_extension();
+  test_sema_nested_nominal_visible_in_member_signatures();
+  test_sema_extension_nested_type_visible_across_extensions();
+  test_sema_metatype_suffix_type_silenced();
+  test_sema_generic_qualified_suffix_not_generic_arg();
+  test_sema_public_alias_to_builtin_and_any_ok();
+  test_sema_internal_type_can_conform_to_private_protocol();
+  test_sema_public_type_private_protocol_rejected();
+  test_sema_set_of_enum_hashable_ok();
+  test_sema_set_of_erased_and_generic_hashable_ok();
   test_sema_witness_happy_path();
   test_sema_witness_return_type_mismatch();
   test_sema_witness_param_count_mismatch();
@@ -1097,6 +1696,7 @@ void run_sema_tests(void) {
   test_sema_witness_param_label_mismatch();
   test_sema_witness_omitted_label_match();
   test_sema_witness_omitted_vs_named_label();
+  test_sema_whole_module_conformance_origin_tokens();
   test_sema_overload_int_double_picks_int();
   test_sema_overload_int_double_picks_double();
   test_sema_overload_label_distinguishes();
@@ -1114,10 +1714,12 @@ void run_sema_tests(void) {
   test_sema_struct_of_sendable_is_sendable();
   test_sema_struct_with_class_member_not_sendable();
   test_sema_class_explicit_sendable_with_class_member_rejected();
+  test_sema_class_explicit_sendable_with_generic_member_ok();
   test_sema_empty_enum_is_sendable();
   test_sema_generic_constraint_struct_rejected();
   test_sema_generic_constraint_int_rejected();
   test_sema_generic_constraint_protocol_ok();
+  test_sema_conditional_extension_generic_arg_constraint_ok();
   test_sema_generic_constraint_class_ok();
   test_sema_builder_single_level();
   test_sema_builder_two_level_nesting();
@@ -1125,6 +1727,7 @@ void run_sema_tests(void) {
   test_sema_diagnostic_overflow_indicator();
   test_sema_await_in_sync_func_rejected();
   test_sema_await_in_async_func_ok();
+  test_sema_await_in_closure_body_ok();
   test_sema_await_at_toplevel_rejected();
   test_sema_error_range_undeclared_type();
   test_sema_error_range_distinct_per_diagnostic();
@@ -1135,5 +1738,11 @@ void run_sema_tests(void) {
   test_sema_sendable_closure_captures_class_rejected();
   test_sema_sendable_closure_captures_struct_ok();
   test_sema_plain_closure_ignores_sendable_check();
+  test_sema_unannotated_closure_param_no_cycle();
+  test_sema_let_self_reference_reports_cycle();
+  test_sema_as_question_mark_is_optional();
   test_sema_if_let_binding();
+  test_sema_optional_binding_may_shadow_parameter();
+  test_sema_if_let_shadow_with_unresolved_initializer_no_cycle();
+  test_sema_unowned_self_capture_does_not_redefine_self();
 }

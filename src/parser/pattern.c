@@ -23,6 +23,7 @@
 #define PAT_IS_VAR        (1u << 8)
 #define PAT_RANGE_PREFIX  (1u << 16)
 #define PAT_RANGE_POSTFIX (1u << 17)
+#define PAT_OPTIONAL      (1u << 18)  /* `x?` optional-some binding suffix */
 
 /* ═══════════════════════════════════════════════════════════════════════════════
  * Helpers
@@ -136,19 +137,65 @@ static ASTNode *make_binding(Parser *p, int is_var) {
   return b;
 }
 
+static ASTNode *parse_binding_tuple(Parser *p, int is_var); /* fwd */
+
+/**
+ * @brief Parses one element of a `let (...)` / `var (...)` binding tuple.
+ *
+ * `let` distributes over the tuple, so an identifier element is a value
+ * binding (`a` → bind a).  Elements may also be optional bindings (`a?`),
+ * wildcards (`_`), `nil`, nested tuples (`(x, y)`), or enum/literal patterns
+ * (`.some`, `nil`).  Anything not handled as a binding falls back to the
+ * general pattern parser.  Always makes forward progress (never returns
+ * without advancing) to avoid an infinite loop on unexpected tokens.
+ */
+static ASTNode *parse_binding_tuple_element(Parser *p, int is_var) {
+  size_t before = p->pos;
+  ASTNode *el = NULL;
+
+  if (P_LPAREN(p)) {
+    el = parse_binding_tuple(p, is_var); /* nested destructure */
+  } else if (tok_is_underscore(p)) {
+    el = parse_pat_wildcard(p);
+  } else if (p_tok(p)->type == TOK_IDENTIFIER) {
+    el = make_binding(p, is_var);
+    /* `a?` / `a!` optional-some binding suffix */
+    if (el && !p_is_eof(p) && p_tok(p)->len == 1 &&
+        (p->src->data[p_tok(p)->pos] == '?' ||
+         p->src->data[p_tok(p)->pos] == '!')) {
+      el->modifiers |= PAT_OPTIONAL;
+      adv(p);
+      el->tok_end = (uint32_t)p->pos;
+    }
+  } else {
+    /* nil / literal / .case — defer to the general pattern parser */
+    el = parse_pattern(p);
+  }
+
+  /* Guarantee progress: an unexpected token (no identifier, no pattern)
+     must still be consumed or the enclosing while-loop spins forever. */
+  if (p->pos == before)
+    adv(p);
+  return el;
+}
+
 /** @brief `let (x, y)` / `var (x, y)` → PATTERN_TUPLE of value bindings. */
 static ASTNode *parse_binding_tuple(Parser *p, int is_var) {
   ASTNode *tup = alloc_node(p, AST_PATTERN_TUPLE);
   if (!tup) return NULL;
   adv(p); /* '(' */
   while (!p_is_eof(p) && !P_RPAREN(p)) {
-    ASTNode *b = make_binding(p, is_var);
+    ASTNode *b = parse_binding_tuple_element(p, is_var);
     if (b) ast_add_child(tup, b);
     if (P_COMMA(p)) adv(p);
   }
   if (P_RPAREN(p)) adv(p);
   tup->tok_end = (uint32_t)p->pos;
   return tup;
+}
+
+ASTNode *parse_binding_tuple_pattern(Parser *p, int is_var) {
+  return parse_binding_tuple(p, is_var);
 }
 
 /**

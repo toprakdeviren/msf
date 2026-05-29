@@ -96,15 +96,22 @@ uint32_t builder_method_name_tok(const SemaContext *ctx, const BuilderEntry *be,
     if (bc->kind == AST_BLOCK) { bbody = bc; break; }
   if (!bbody)
     return 0;
-  const char *src = ctx->src->data;
+  /* Read against the builder type's OWN stream (captured at registration), not
+   * ctx's active file — they differ when the builder is used cross-file. */
+  const Token  *toks = be->tokens ? be->tokens : ctx->tokens;
+  const Source *bsrc = be->src    ? be->src    : ctx->src;
+  uint32_t      ntok = be->tokens ? be->token_count : ctx->token_count;
+  (void)ctx;
   for (const ASTNode *bm = bbody->first_child; bm; bm = bm->next_sibling) {
     if (bm->kind != AST_FUNC_DECL)
       continue;
-    const Token *nt = &ctx->tokens[bm->data.func.name_tok];
+    uint32_t ti = bm->data.func.name_tok;
+    if (ntok && ti >= ntok) continue;          /* bounds-guard the token index */
+    const Token *nt = &toks[ti];
     size_t nlen = nt->len;
-    if (nlen && method_name && strncmp(src + nt->pos, method_name, nlen) == 0 &&
+    if (nlen && method_name && strncmp(bsrc->data + nt->pos, method_name, nlen) == 0 &&
         method_name[nlen] == '\0')
-      return (uint32_t)bm->data.func.name_tok;
+      return ti;
   }
   return 0;
 }

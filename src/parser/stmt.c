@@ -315,9 +315,20 @@ static ASTNode *parse_catch_clause(Parser *p) {
   if (!p_is_eof(p) && !P_LBRACE(p)) {
     size_t before = p->pos;
     ASTNode *pat = parse_pattern(p);
-    if (pat)
+    if (pat) {
       ast_add_child(clause, pat);
-    else {
+      /* Optional guard: `catch <pattern> where <expr>`. Suppress trailing
+       * closures so the `{` body isn't swallowed into the guard expression. */
+      if (p_is_kw(p, KW_WHERE)) {
+        adv(p);
+        int saved = p->no_trailing_closure;
+        p->no_trailing_closure = 1;
+        ASTNode *guard = parse_expr_pratt(p, 0);
+        p->no_trailing_closure = saved;
+        if (guard)
+          ast_add_child(clause, guard);
+      }
+    } else {
       p->pos = before;
       while (!p_is_eof(p) && !P_LBRACE(p)) adv(p);
     }
@@ -361,7 +372,17 @@ ASTNode *parse_do(Parser *p) {
 
 /** @brief Returns 1 if at a case clause boundary (case/default/'}' after switch body). */
 static int at_case_boundary(const Parser *p) {
-  return p_is_kw(p, KW_CASE) || p_is_kw(p, KW_DEFAULT) || P_RBRACE(p);
+  if (p_is_kw(p, KW_CASE) || p_is_kw(p, KW_DEFAULT) || P_RBRACE(p))
+    return 1;
+  /* `@unknown default:` — the `@unknown` attribute starts a new clause, so the
+   * preceding case body must end here (not swallow the attribute). */
+  if (!p_is_eof(p) && p->src->data[p_tok(p)->pos] == '@') {
+    const Token *nx = p_peek1(p);
+    if (nx && nx->len == 7 &&
+        memcmp(p->src->data + nx->pos, "unknown", 7) == 0)
+      return 1;
+  }
+  return 0;
 }
 
 /** @brief Parses comma-separated patterns + optional where guard for a case clause. */
@@ -397,8 +418,12 @@ ASTNode *parse_switch(Parser *p) {
   ASTNode *node = alloc_node(p, AST_SWITCH_STMT);
   if (!node) return NULL;
 
-  /* Subject expression */
+  /* Subject expression. The following `{` belongs to the switch body, never
+   * to a trailing closure on the subject expression. */
+  int old_no_trailing = p->no_trailing_closure;
+  p->no_trailing_closure = 1;
   ASTNode *subj = parse_expr_pratt(p, 0);
+  p->no_trailing_closure = old_no_trailing;
   if (subj) ast_add_child(node, subj);
 
   if (!P_LBRACE(p)) { node->tok_end = (uint32_t)p->pos; return node; }
@@ -406,6 +431,23 @@ ASTNode *parse_switch(Parser *p) {
 
   /* Case clauses */
   while (!p_is_eof(p) && !P_RBRACE(p)) {
+    /* Skip a leading case attribute, e.g. `@unknown default:` (the non-frozen
+     * enum exhaustiveness marker). It's `@` + name + optional `(args)`. */
+    while (!p_is_eof(p) && p->src->data[p_tok(p)->pos] == '@') {
+      adv(p); /* '@' */
+      if (!p_is_eof(p) &&
+          (p_tok(p)->type == TOK_IDENTIFIER || p_tok(p)->type == TOK_KEYWORD))
+        adv(p); /* attribute name, e.g. `unknown` */
+      if (!p_is_eof(p) && p->src->data[p_tok(p)->pos] == '(') {
+        int depth = 0;
+        do {
+          char c = p->src->data[p_tok(p)->pos];
+          if (c == '(') depth++;
+          else if (c == ')') depth--;
+          adv(p);
+        } while (!p_is_eof(p) && depth > 0);
+      }
+    }
     if (p_is_kw(p, KW_CASE) || p_is_kw(p, KW_DEFAULT)) {
       ASTNode *clause = alloc_node(p, AST_CASE_CLAUSE);
       if (!clause) return NULL;

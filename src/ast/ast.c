@@ -255,6 +255,7 @@ static const char *const AST_KIND_NAMES[] = {
     /*  99 */ "pattern_any",
     /* 100 */ "pattern_binding",
     /* 101 */ "optional_binding_cond",
+    /* 102 */ "macro_decl",
 };
 _Static_assert(sizeof(AST_KIND_NAMES) / sizeof(AST_KIND_NAMES[0]) == AST__COUNT,
     "AST_KIND_NAMES size != AST__COUNT");

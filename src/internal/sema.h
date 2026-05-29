@@ -52,6 +52,47 @@ SemaContext *sema_init(const Source *src, const Token *tokens,
 /** @brief Runs semantic analysis: forward declarations + type resolution. */
 int sema_analyze(SemaContext *ctx, ASTNode *root);
 
+/** @brief One parsed source file of a module, for sema_analyze_module(). */
+typedef struct {
+  const Source *src;          /**< File source (for diagnostics + token text). */
+  const Token  *tokens;       /**< File token stream.                          */
+  uint32_t      token_count;  /**< Number of tokens (for bounds-safe interning).*/
+  ASTNode      *root;         /**< File AST root (parsed into shared AST arena).*/
+} SemaModuleFile;
+
+/**
+ * @brief Whole-module semantic analysis over several files sharing one context.
+ *
+ * Runs the passes module-wide: declare ALL files' top-level decls into the
+ * shared symbol table first, then resolve ALL files, then check conformances.
+ * Because the symbol table / type arena / intern pool are shared, a reference
+ * in one file to a type, member, or nested type declared in a sibling file
+ * resolves naturally — no SDK stubs, no text concatenation. Each file keeps its
+ * own token stream and source, so diagnostics and token text stay correct.
+ */
+int sema_analyze_module(SemaContext *ctx, const SemaModuleFile *files, size_t nfiles);
+
+/**
+ * @brief Predeclares an external type name into the global scope (TY_NAMED).
+ *
+ * Call between sema_init() and sema_analyze() to make module-level names from
+ * sibling files / imported modules visible, so references resolve instead of
+ * reporting "use of undeclared type". Idempotent; ignores already-defined names.
+ */
+void sema_predeclare_module_type(SemaContext *ctx, const char *name);
+
+/**
+ * @brief Attaches a runtime module vocabulary (a parsed .msfvocab).
+ *
+ * Call between sema_init() and sema_analyze().  When set, an `import X` in the
+ * source resolves X's public type names from @p vocab before falling back to
+ * the host's compiled module table.  @p vocab is borrowed, not owned.
+ */
+void sema_set_vocabulary(SemaContext *ctx, const struct MSFVocab *vocab);
+
+/** @brief Sets the global-fallback SDK vocabulary (see SemaContext.sdk_vocab). */
+void sema_set_sdk_vocabulary(SemaContext *ctx, const struct MSFVocab *vocab);
+
 /** @brief Destroys the sema context (including intern pool). */
 void sema_destroy(SemaContext *ctx);
 
@@ -68,6 +109,9 @@ uint32_t    sema_error_line(const SemaContext *ctx, uint32_t index);
 
 /** @brief Returns the 1-based column number of the error at @p index. */
 uint32_t    sema_error_col(const SemaContext *ctx, uint32_t index);
+
+/** @brief Returns the owning file path of the error at @p index (or NULL). */
+const char *sema_error_file(const SemaContext *ctx, uint32_t index);
 
 /** @brief Returns the conformance table (NULL if sema not initialized). */
 const ConformanceTable *sema_conformance_table(const SemaContext *ctx);

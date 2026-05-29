@@ -316,6 +316,7 @@ ASTNode *parse_block(Parser *p);
 /* — Declarations (decl/) -------------------------------------------------- */
 
 ASTNode *parse_func_decl(Parser *p, uint32_t mods);
+ASTNode *parse_macro_decl(Parser *p, uint32_t mods);
 ASTNode *parse_var_decl(Parser *p, int is_let, uint32_t mods);
 ASTNode *parse_init_decl(Parser *p, uint32_t mods);
 ASTNode *parse_deinit_decl(Parser *p);
@@ -341,6 +342,15 @@ uint32_t parse_optional_param_name(Parser *p);
 void register_operator_from_ast(Parser *p, ASTNode *node);
 void register_precedence_group_from_ast(Parser *p, ASTNode *node);
 
+/* — Attributes (top.c) --------------------------------------------------- */
+
+/* Parses a run of `@A @B(args)` attributes into a next_sibling chain (head
+ * returned, *out_tail = last).  Sets modifier bits in *extra_mods for marker
+ * attributes (@MainActor, ...). */
+ASTNode *parse_attribute_chain(Parser *p, uint32_t *extra_mods, ASTNode **out_tail);
+/* Splices an attribute chain (next_sibling-linked) as @p decl's leading children. */
+void attach_attribute_chain(ASTNode *decl, ASTNode *head);
+
 /* — Statements (stmt.c) -------------------------------------------------- */
 
 ASTNode *parse_decl_stmt(Parser *p);
@@ -365,6 +375,7 @@ ASTNode *parse_postfix(Parser *p, ASTNode *lhs);
 ASTNode *parse_expr_pratt(Parser *p, int min_prec);
 ASTNode *parse_closure_body(Parser *p);
 ASTNode *parse_pattern(Parser *p);
+ASTNode *parse_binding_tuple_pattern(Parser *p, int is_var);
 Prec get_infix_prec(Parser *p);
 Prec get_custom_infix_prec(Parser *p);
 void parse_arg_list(Parser *p, ASTNode *parent, char end_char);

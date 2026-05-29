@@ -19,6 +19,8 @@ extern void run_integration_tests(void);
 extern void run_regression_tests(void);
 extern void run_error_recovery_tests(void);
 extern void run_swift_fixture_tests(void);
+extern void run_vocab_tests(void);
+extern void run_project_tests(void);
 
 int main(void) {
   printf("\033[1m══════════════════════════════════════════════════════════════\033[0m\n");
@@ -33,6 +35,8 @@ int main(void) {
   run_regression_tests();
   run_error_recovery_tests();
   run_swift_fixture_tests();
+  run_vocab_tests();
+  run_project_tests();
 
   TEST_SUMMARY();
   return TEST_EXIT_CODE();

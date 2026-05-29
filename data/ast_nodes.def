@@ -126,3 +126,7 @@ AST_NODE(PATTERN_RANGE,        "pattern_range",             PATTERN)
 AST_NODE(PATTERN_WILDCARD,     "pattern_any",               PATTERN) /* swiftc name */
 AST_NODE(PATTERN_VALUE_BINDING,"pattern_binding",           PATTERN) /* swiftc name */
 AST_NODE(OPTIONAL_BINDING,     "optional_binding_cond",     PATTERN)
+
+/* ── Macros (Swift 5.9) ────────────────────────────────────────────────────── */
+/* Appended at the end so existing ASTNodeKind values stay put. */
+AST_NODE(MACRO_DECL,           "macro_decl",                DECL)

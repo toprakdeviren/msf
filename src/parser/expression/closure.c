@@ -86,8 +86,28 @@ static void parse_closure_signature(Parser *p, ASTNode *cl) {
   int has_in = 0;
 
   if (P_LPAREN(p)) {
-    /* Full typed param list: (a: Int, b: Int) -> RetType in */
+    /* Full typed param list: (a: Int, b: Int) async throws(E) -> RetType in */
     parse_params(p, cl);
+
+    /* Optional effects before the arrow. Collect into a local mask and only
+     * commit to `cl` once we confirm this really is a closure signature (the
+     * `in` below) — otherwise the `p->pos = saved` backtrack would leave stale
+     * modifiers on a closure that has only a body. parse_throws_clause handles
+     * typed throws `throws(ErrorType)`. */
+    uint32_t eff = 0;
+    if (p_is_kw(p, KW_ASYNC)) {
+      eff |= MOD_ASYNC;
+      adv(p);
+    }
+    {
+      ASTNode *tc = parse_throws_clause(p);
+      if (tc) {
+        if (throws_clause_is_throwing(p->src, p->ts, tc))
+          eff |= MOD_THROWS;
+        if (tc->modifiers & MOD_RETHROWS)
+          eff |= MOD_RETHROWS;
+      }
+    }
 
     if (!p_is_eof(p) && p_tok(p)->type == TOK_OPERATOR &&
         p_tok(p)->op_kind == OP_ARROW) {
@@ -99,6 +119,7 @@ static void parse_closure_signature(Parser *p, ASTNode *cl) {
 
     if (p_is_kw(p, KW_IN)) {
       has_in = 1;
+      cl->modifiers |= eff;
       adv(p);
     } else {
       /* Not a param list — backtrack */
@@ -137,6 +158,23 @@ static void parse_closure_signature(Parser *p, ASTNode *cl) {
         break;
     }
 
+    /* Optional effects before the arrow on the shorthand form:
+     * { tx async throws(E) -> Ret in } (single un-parenthesized param). */
+    uint32_t eff2 = 0;
+    if (!has_in && p_is_kw(p, KW_ASYNC)) {
+      eff2 |= MOD_ASYNC;
+      adv(p);
+    }
+    if (!has_in) {
+      ASTNode *tc = parse_throws_clause(p);
+      if (tc) {
+        if (throws_clause_is_throwing(p->src, p->ts, tc))
+          eff2 |= MOD_THROWS;
+        if (tc->modifiers & MOD_RETHROWS)
+          eff2 |= MOD_RETHROWS;
+      }
+    }
+
     /* Optional explicit result: -> Type before 'in' */
     if (!has_in && !p_is_eof(p) && p_tok(p)->type == TOK_OPERATOR &&
         p_tok(p)->op_kind == OP_ARROW) {
@@ -148,6 +186,7 @@ static void parse_closure_signature(Parser *p, ASTNode *cl) {
 
     if (!has_in && p_is_kw(p, KW_IN)) {
       has_in = 1;
+      cl->modifiers |= eff2;
       adv(p);
     }
 

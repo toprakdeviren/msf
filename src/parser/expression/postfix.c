@@ -152,20 +152,29 @@ static ASTNode *parse_postfix_subscript(Parser *p, ASTNode *lhs) {
 static ASTNode *parse_postfix_optional_chain(Parser *p, ASTNode *lhs) {
   if (!p_is_eof(p) && p->src->data[p_tok(p)->pos] == '?' &&
       p_tok(p)->type == TOK_OPERATOR && p_tok(p)->len == 1) {
-    uint32_t prev_end = lhs->tok_end > 0 ? lhs->tok_end : (p_tok(p)->pos);
-
-    if (p_tok(p)->pos == prev_end ||
-        (p_tok(p)->col > 1 && lhs->tok_idx + 1 >= p->pos - 1)) {
-      uint32_t qpos = p_tok(p)->pos;
-      if (qpos > 0 && p->src->data[qpos - 1] != ' ' &&
-          p->src->data[qpos - 1] != '\n' && p->src->data[qpos - 1] != '\t') {
-        ASTNode *oc = alloc_node(p, AST_OPTIONAL_CHAIN);
-        if (!oc) return NULL;
-        ast_add_child(oc, lhs);
-        adv(p);
-        oc->tok_end = (uint32_t)p->pos;
-        return oc;
-      }
+    /* Distinguish optional-chaining `?` from the ternary `a ? b : c`.  An
+     * optional-chain `?` is (a) adjacent to the LHS — no preceding whitespace,
+     * which rules out `a ? b` — and (b) immediately followed by `.`, `[`, or `(`
+     * (the `?.` / `?[` / `?(` forms), which rules out a spaceless ternary
+     * `a?b:c` and `cond ? .foo : .bar` (whose `?` is followed by a space).
+     * The previous adjacency test compared a byte offset to a token index and
+     * so missed `arr[i]?.member` after a subscript — the `?` then fell through
+     * to the ternary parser, wrecking the whole enclosing statement. */
+    const char *src = p->src->data;
+    size_t slen = p->src->len;
+    uint32_t qpos = p_tok(p)->pos;
+    int no_space_before =
+        (qpos > 0 && src[qpos - 1] != ' ' && src[qpos - 1] != '\n' &&
+         src[qpos - 1] != '\t' && src[qpos - 1] != '\r');
+    char after = (qpos + 1 < slen) ? src[qpos + 1] : '\0';
+    int chain_follows = (after == '.' || after == '[' || after == '(');
+    if (no_space_before && chain_follows) {
+      ASTNode *oc = alloc_node(p, AST_OPTIONAL_CHAIN);
+      if (!oc) return NULL;
+      ast_add_child(oc, lhs);
+      adv(p);
+      oc->tok_end = (uint32_t)p->pos;
+      return oc;
     }
   }
   return NULL;

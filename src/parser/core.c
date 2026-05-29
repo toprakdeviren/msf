@@ -134,9 +134,15 @@ void skip_generic_params(Parser *p) {
   adv(p);
   int d = 1;
   while (!p_is_eof(p) && d > 0) {
-    char c = cur_char(p);
-    if (c == '<') d++;
-    else if (c == '>') d--;
+    const Token *t = p_tok(p);
+    char c = p->src->data[t->pos];
+    if (c == '<') {
+      d++;
+    } else if (c == '>') {
+      /* One token can close several levels at once: `>>`, `>>>`. */
+      for (uint32_t i = 0; i < t->len && p->src->data[t->pos + i] == '>'; i++)
+        d--;
+    }
     adv(p);
   }
 }
@@ -208,6 +214,19 @@ uint32_t collect_modifiers(Parser *p) {
     case KW_LAZY:        mods |= MOD_LAZY;        adv(p); break;
     case KW_MUTATING:    mods |= MOD_MUTATING;    adv(p); break;
     case KW_ASYNC:       mods |= MOD_ASYNC;       adv(p); break;
+
+    /* `borrowing func` / `consuming func` — method ownership modifiers.  Guard
+     * on a following `func` so these contextual keywords used elsewhere (e.g. a
+     * parameter ownership modifier) are left for their own parser. */
+    case KW_BORROWING:
+    case KW_CONSUMING:
+      if (p->pos + 1 < p->ts->count &&
+          p->ts->tokens[p->pos + 1].keyword == KW_FUNC) {
+        mods |= (p_tok(p)->keyword == KW_BORROWING) ? MOD_BORROWING : MOD_CONSUMING;
+        adv(p);
+        break;
+      }
+      goto done;
 
     /* Access modifiers that support setter-access: private(set), etc. */
     case KW_PRIVATE:     consume_access_modifier(p, &mods, MOD_PRIVATE,     1); break;
@@ -419,12 +438,39 @@ ASTNode *parse_hash_directive(Parser *p) {
   adv(p);
   if (p_is_eof(p)) return NULL;
 
-  /* #if / #elseif */
-  if (p_is_kw(p, KW_IF) || tok_text_eq(p, CK_ELSEIF, 6))
+  /* #if — keep this (first) branch; just skip its condition. */
+  if (p_is_kw(p, KW_IF))
     { skip_directive_condition(p); return NULL; }
 
-  /* #else / #endif */
-  if (p_is_kw(p, KW_ELSE) || tok_text_eq(p, CK_ENDIF, 5))
+  /* #elseif / #else — the alternative branch(es).  Swift compiles only ONE
+   * branch, so we analyse the first (#if) branch and skip the rest up to the
+   * matching #endif (tracking nested #if).  Parsing an alternative body too
+   * would re-declare its symbols in the same scope → false "Redefinition of X"
+   * (e.g. `#if DEBUG let x = a #else let x = b #endif`). */
+  if (tok_text_eq(p, CK_ELSEIF, 6) || p_is_kw(p, KW_ELSE)) {
+    adv(p); /* consume the elseif/else keyword */
+    int depth = 0;
+    while (!p_is_eof(p)) {
+      if (p_tok(p)->type == TOK_OPERATOR && p_tok(p)->len == 1 &&
+          p->src->data[p_tok(p)->pos] == '#') {
+        const Token *nx = p_peek1(p);
+        if (nx->type == TOK_KEYWORD && nx->keyword == KW_IF) {
+          adv(p); adv(p); depth++; continue;          /* nested #if */
+        }
+        if (nx->type == TOK_IDENTIFIER && tok_eq(p, nx, CK_ENDIF)) {
+          adv(p); adv(p);                             /* consume '#' 'endif' */
+          if (depth == 0) return NULL;                /* our matching #endif */
+          depth--; continue;
+        }
+        adv(p); continue;        /* a nested #else/#elseif/#warning — skip '#' */
+      }
+      adv(p);
+    }
+    return NULL; /* EOF before #endif — tolerate */
+  }
+
+  /* #endif — closes the branch we just parsed. */
+  if (tok_text_eq(p, CK_ENDIF, 5))
     { adv(p); return NULL; }
 
   /* #warning("...") / #error("...") / #sourceLocation(...) / #line */

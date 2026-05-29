@@ -304,6 +304,54 @@ uint32_t scan_number(const uint8_t *src, uint32_t pos,
  * @param lines  Receives the number of newlines inside the string.
  * @return       Number of bytes consumed (including both quotes).
  */
+/* Skip a `\(...)` string interpolation, returning the position just past the
+ * matching ')'.  Balances parens AND skips nested string literals so that a
+ * quote inside the interpolation — e.g. `\(f("hi"))` or `\(d["x"] ?? -1)` —
+ * does not prematurely terminate the enclosing string.  `guard` bounds the
+ * mutual recursion (interpolation → nested string → interpolation …) against
+ * pathological input; on exhaustion it degrades to plain paren-balancing. */
+static const uint8_t *skip_str_interp(const uint8_t *p, const uint8_t *eos,
+                                      uint32_t *lines, int guard);
+
+/* p is just past the opening `"`; skip to just past the unescaped closing `"`. */
+static const uint8_t *skip_interp_nested_string(const uint8_t *p,
+                                                const uint8_t *eos,
+                                                uint32_t *lines, int guard) {
+  while (p < eos) {
+    uint8_t ch = *p;
+    if (ch == '\\') {
+      if (guard > 0 && p + 1 < eos && p[1] == '(') {  /* nested \(...) */
+        p = skip_str_interp(p + 2, eos, lines, guard - 1);
+        continue;
+      }
+      if (p + 1 < eos && p[1] == '\n') (*lines)++;
+      p += 2;
+      continue;
+    }
+    if (ch == '\n') { (*lines)++; p++; continue; }
+    if (ch == '"') return p + 1;  /* closing quote */
+    p++;
+  }
+  return p;
+}
+
+static const uint8_t *skip_str_interp(const uint8_t *p, const uint8_t *eos,
+                                      uint32_t *lines, int guard) {
+  int depth = 1;
+  while (p < eos && depth > 0) {
+    uint8_t ch = *p;
+    if (ch == '\n') { (*lines)++; p++; continue; }
+    if (ch == '"' && guard > 0) {              /* nested string literal */
+      p = skip_interp_nested_string(p + 1, eos, lines, guard);
+      continue;
+    }
+    if (ch == '(')      depth++;
+    else if (ch == ')') depth--;
+    p++;
+  }
+  return p;
+}
+
 uint32_t scan_string_body(const uint8_t *src, uint32_t pos,
                           uint32_t len, uint32_t *lines) {
   uint32_t       start = pos;
@@ -337,8 +385,14 @@ uint32_t scan_string_body(const uint8_t *src, uint32_t pos,
       break;
     }
 
-    /* Backslash: skip '\' and the next char */
-    body = nb + 2;
+    /* Backslash: `\(...)` is a string interpolation — skip the whole balanced
+     * segment (incl. nested string literals) so a quote inside it doesn't end
+     * the string.  Any other escape is just `\` + the next char. */
+    if (nb + 1 < eos && nb[1] == '(') {
+      body = skip_str_interp(nb + 2, eos, lines, 64);
+    } else {
+      body = nb + 2;
+    }
     if (body > eos) { body = eos; break; }
   }
 

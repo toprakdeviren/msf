@@ -55,6 +55,10 @@ static ASTNode *parse_single_attribute(Parser *p, uint32_t *extra_mods) {
 
   if (p_tok(p)->type == TOK_IDENTIFIER || p_tok(p)->type == TOK_KEYWORD)
     adv(p);
+  /* Property-wrapper attributes can carry generic args before any `(...)`:
+   * @Published<Bool>, @ObservedObject<Document>, @IntentParameter<URL>. */
+  if (!p_is_eof(p) && cur_char(p) == '<')
+    skip_generic_params(p);
   if (P_LPAREN(p))
     skip_balanced(p, '(', ')');
   attr->tok_end = (uint32_t)p->pos;
@@ -65,8 +69,8 @@ static ASTNode *parse_single_attribute(Parser *p, uint32_t *extra_mods) {
  *  via `next_sibling`.  Returns the head, with `*out_tail` pointing at the
  *  last node so callers can splice the chain into a declaration's
  *  children. */
-static ASTNode *parse_attribute_chain(Parser *p, uint32_t *extra_mods,
-                                      ASTNode **out_tail) {
+ASTNode *parse_attribute_chain(Parser *p, uint32_t *extra_mods,
+                               ASTNode **out_tail) {
   ASTNode *head = NULL, *tail = NULL;
   while (!p_is_eof(p) && p_tok(p)->type == TOK_OPERATOR &&
          p->src->data[p_tok(p)->pos] == '@') {
@@ -84,7 +88,7 @@ static ASTNode *parse_attribute_chain(Parser *p, uint32_t *extra_mods,
  *  leading children of @p decl.  Each attribute's parent/next_sibling is
  *  re-linked so the decl owns the chain structurally.  No-op if either
  *  argument is NULL. */
-static void attach_attribute_chain(ASTNode *decl, ASTNode *head) {
+void attach_attribute_chain(ASTNode *decl, ASTNode *head) {
   if (!decl || !head) return;
   for (ASTNode *a = head, *next; a; a = next) {
     next = a->next_sibling;
@@ -277,6 +281,15 @@ ASTNode *parse_decl_stmt(Parser *p) {
   if (p_tok(p)->type == TOK_IDENTIFIER &&
       tok_text_eq(p, CK_PRECEDENCEGROUP_ID, sizeof(CK_PRECEDENCEGROUP_ID) - 1)) {
     result = parse_precedence_group_decl(p);
+    goto done;
+  }
+
+  /* macro declaration (Swift 5.9 — `macro` is contextual). Only when followed
+   * by a name, so `macro` as a variable/call (`macro(...)`, `let macro = …`)
+   * is left to the expression fallback. */
+  if (p_tok(p)->type == TOK_IDENTIFIER && tok_text_eq(p, "macro", 5) &&
+      p_peek1(p)->type == TOK_IDENTIFIER) {
+    result = parse_macro_decl(p, mods);
     goto done;
   }
 

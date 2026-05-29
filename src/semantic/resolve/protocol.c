@@ -57,8 +57,7 @@ const ASTNode *protocol_req_return_type_node(const ASTNode *req) {
 const char *type_ast_ident_name(const ASTNode *n, SemaContext *ctx) {
   if (!n || n->kind != AST_TYPE_IDENT || n->tok_idx == 0 || !ctx)
     return NULL;
-  const Token *t = &ctx->tokens[n->tok_idx];
-  return sema_intern(ctx, ctx->src->data + t->pos, t->len);
+  return tok_intern_at_node(ctx, n, n->tok_idx);
 }
 
 /*
@@ -137,7 +136,19 @@ const char *param_external_label_str(SemaContext *ctx, const ASTNode *param,
     *out_omitted = 0;
   if (!param || !param->data.var.name_tok)
     return NULL;
+
+  SemaOriginState origin_state;
+  sema_origin_enter(ctx, param, &origin_state);
+
   uint32_t nt = param->data.var.name_tok;
+  const Token *t = &ctx->tokens[nt];
+  if (t->len == 1 && ctx->src->data[t->pos] == '_') {
+    if (out_omitted)
+      *out_omitted = 1;
+    sema_origin_leave(ctx, &origin_state);
+    return NULL;
+  }
+
   if (nt >= 1) {
     const Token *prev = &ctx->tokens[nt - 1];
     /* `_` may be lexed as TOK_OPERATOR or TOK_IDENTIFIER depending on
@@ -145,19 +156,25 @@ const char *param_external_label_str(SemaContext *ctx, const ASTNode *param,
     if (prev->len == 1 && ctx->src->data[prev->pos] == '_') {
       if (out_omitted)
         *out_omitted = 1;
+      sema_origin_leave(ctx, &origin_state);
       return NULL;
     }
     /* An identifier OR a keyword (Swift allows `in`, `at`, etc. as labels)
      * preceding the internal name is the external label. */
-    if (prev->type == TOK_IDENTIFIER || prev->type == TOK_KEYWORD)
-      return sema_intern(ctx, ctx->src->data + prev->pos, prev->len);
+    if (prev->type == TOK_IDENTIFIER || prev->type == TOK_KEYWORD) {
+      const char *label = sema_intern(ctx, ctx->src->data + prev->pos, prev->len);
+      sema_origin_leave(ctx, &origin_state);
+      return label;
+    }
   }
-  const Token *t = &ctx->tokens[nt];
-  return sema_intern(ctx, ctx->src->data + t->pos, t->len);
+  const char *label = sema_intern(ctx, ctx->src->data + t->pos, t->len);
+  sema_origin_leave(ctx, &origin_state);
+  return label;
 }
 
+
 /* Returns the return-type AST node of a func/init AST decl, or NULL. */
-static const ASTNode *func_decl_return_type_node(const ASTNode *decl) {
+const ASTNode *func_decl_return_type_node(const ASTNode *decl) {
   if (!decl)
     return NULL;
   const ASTNode *last_ty = NULL;
@@ -238,6 +255,29 @@ static int type_is_unresolved_for_witness(const TypeInfo *t) {
   }
 }
 
+/* True if a type-annotation node is a bare `Self`. */
+static int type_node_is_self(SemaContext *ctx, const ASTNode *n) {
+  if (!n || n->kind != AST_TYPE_IDENT || !n->tok_idx)
+    return 0;
+  const char *nm = tok_intern_at_node(ctx, n, n->tok_idx);
+  return nm && strcmp(nm, "Self") == 0;
+}
+
+/* `Self` in a protocol requirement denotes the conforming type. An
+ * implementation whose corresponding type is the conforming type itself (or
+ * also written `Self`) satisfies the requirement — e.g. `static func read() ->
+ * Self` is satisfied by `static func read() -> Metadata` in `struct Metadata`. */
+static int self_req_satisfied(SemaContext *ctx, const ASTNode *req_node,
+                              const ASTNode *impl_node, const TypeInfo *impl_ty,
+                              const char *type_name) {
+  if (!type_node_is_self(ctx, req_node))
+    return 0;
+  if (type_node_is_self(ctx, impl_node))
+    return 1;
+  return impl_ty && impl_ty->kind == TY_NAMED && impl_ty->named.name &&
+         type_name && strcmp(impl_ty->named.name, type_name) == 0;
+}
+
 /* Validate that an implementation func/init satisfies the protocol
  * requirement's signature: parameter count, external labels, parameter
  * types, and return type. Emits a diagnostic on the first mismatch and
@@ -298,6 +338,7 @@ int validate_witness_func_signature(SemaContext *ctx, const ASTNode *type_decl,
     TypeInfo *i_ty = i_ty_n ? resolve_type_annotation(ctx, (ASTNode *)i_ty_n) : NULL;
     if (!type_is_unresolved_for_witness(r_ty) &&
         !type_is_unresolved_for_witness(i_ty) &&
+        !self_req_satisfied(ctx, r_ty_n, i_ty_n, i_ty, type_name) &&
         !type_equal(r_ty, i_ty)) {
       sema_error(ctx, (ASTNode *)impl,
                  "type '%s' does not conform to protocol '%s': expected '%s', "
@@ -324,6 +365,7 @@ int validate_witness_func_signature(SemaContext *ctx, const ASTNode *type_decl,
     if (!req_is_opaque &&
         !type_is_unresolved_for_witness(r_ret) &&
         !type_is_unresolved_for_witness(i_ret) &&
+        !self_req_satisfied(ctx, r_ret_n, i_ret_n, i_ret, type_name) &&
         !type_equal(r_ret, i_ret)) {
       sema_error(ctx, (ASTNode *)impl,
                  "type '%s' does not conform to protocol '%s': expected '%s', "
@@ -350,8 +392,7 @@ int protocol_extension_has_default(SemaContext *ctx, const ASTNode *root,
   for (const ASTNode *top = root->first_child; top; top = top->next_sibling) {
     if (top->kind != AST_EXTENSION_DECL || !top->data.var.name_tok)
       continue;
-    const Token *et = &ctx->tokens[top->data.var.name_tok];
-    const char *ext_name = sema_intern(ctx, ctx->src->data + et->pos, et->len);
+    const char *ext_name = tok_intern_at_node(ctx, top, top->data.var.name_tok);
     if (strcmp(ext_name, proto_name) != 0)
       continue;
     const Symbol *sym = sema_lookup(ctx, ext_name);
@@ -368,13 +409,11 @@ int protocol_extension_has_default(SemaContext *ctx, const ASTNode *root,
       continue;
     for (const ASTNode *m = block->first_child; m; m = m->next_sibling) {
       if (m->kind == AST_FUNC_DECL) {
-        const Token *mt = &ctx->tokens[m->data.func.name_tok];
-        const char *mn = sema_intern(ctx, ctx->src->data + mt->pos, mt->len);
+        const char *mn = tok_intern_at_node(ctx, m, m->data.func.name_tok);
         if (mn && strcmp(mn, req_name) == 0)
           return 1;
       } else if (m->kind == AST_VAR_DECL || m->kind == AST_LET_DECL) {
-        const Token *mt = &ctx->tokens[m->data.var.name_tok];
-        const char *mn = sema_intern(ctx, ctx->src->data + mt->pos, mt->len);
+        const char *mn = tok_intern_at_node(ctx, m, m->data.var.name_tok);
         if (mn && strcmp(mn, req_name) == 0)
           return 1;
       } else if (m->kind == AST_INIT_DECL && strcmp(req_name, "init") == 0)

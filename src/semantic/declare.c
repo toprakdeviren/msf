@@ -35,6 +35,51 @@ void declare_in_scope(SemaContext *ctx, ASTNode *node) {
   sema_pop_scope(ctx);
 }
 
+static void declare_generic_params_in_scope(SemaContext *ctx, ASTNode *node) {
+  for (ASTNode *c = node->first_child; c; c = c->next_sibling) {
+    if (c->kind != AST_GENERIC_PARAM)
+      continue;
+    const char *pname = tok_intern(ctx, c->tok_idx);
+    TypeInfo *gp_ti = c->type;
+    if (!gp_ti) {
+      gp_ti = type_arena_alloc(ctx->type_arena);
+      if (!gp_ti)
+        continue;
+      gp_ti->kind = TY_GENERIC_PARAM;
+      gp_ti->param.name = pname;
+      gp_ti->param.index = 0;
+      gp_ti->param.constraints = NULL;
+      gp_ti->param.constraint_count = 0;
+      c->type = gp_ti;
+    }
+    sema_define(ctx, pname, SYM_TYPE, gp_ti, c);
+  }
+}
+
+static void declare_nominal_in_scope(SemaContext *ctx, ASTNode *node) {
+  sema_push_scope(ctx);
+  declare_generic_params_in_scope(ctx, node);
+  declare_children(ctx, node);
+  sema_pop_scope(ctx);
+}
+
+static void declare_extension_in_scope(SemaContext *ctx, ASTNode *node) {
+  sema_push_scope(ctx);
+  if (node->data.var.name_tok) {
+    const char *ext_name = tok_intern(ctx, node->data.var.name_tok);
+    Symbol *sym = sema_lookup(ctx, ext_name);
+    if (sym && sym->type && sym->type->kind == TY_NAMED &&
+        sym->type->named.decl) {
+      ASTNode *decl = sym->type->named.decl;
+      if (decl->kind == AST_STRUCT_DECL || decl->kind == AST_CLASS_DECL ||
+          decl->kind == AST_ENUM_DECL || decl->kind == AST_ACTOR_DECL)
+        declare_generic_params_in_scope(ctx, decl);
+    }
+  }
+  declare_children(ctx, node);
+  sema_pop_scope(ctx);
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════════
  * Helpers
  * ═══════════════════════════════════════════════════════════════════════════════ */
@@ -59,9 +104,9 @@ static const char *member_name(SemaContext *ctx, const ASTNode *m) {
  *
  * Used for access-level comparisons (subclass vs superclass, override, etc.).
  */
-static uint32_t effective_access(uint32_t mods) {
+uint32_t effective_access(uint32_t mods) {
   uint32_t acc_mask = MOD_PUBLIC | MOD_PRIVATE | MOD_INTERNAL |
-                      MOD_FILEPRIVATE | MOD_PACKAGE;
+                      MOD_FILEPRIVATE | MOD_PACKAGE | MOD_OPEN;
   uint32_t acc = mods & acc_mask;
   return acc ? acc : MOD_INTERNAL;
 }
@@ -272,8 +317,10 @@ static void record_conformances(SemaContext *ctx, const ASTNode *node,
       /* Protocol must be at least as visible as the conforming type */
       Symbol *ps = sema_lookup(ctx, pname);
       if (ps && ps->decl && ps->decl->kind == AST_PROTOCOL_DECL) {
-        if (access_rank(effective_access(ps->decl->modifiers)) <
-            access_rank(effective_access(node->modifiers)))
+        const uint32_t proto_access = effective_access(ps->decl->modifiers);
+        const uint32_t type_access = effective_access(node->modifiers);
+        if (access_rank(proto_access) <= access_rank(MOD_FILEPRIVATE) &&
+            access_rank(type_access) >= access_rank(MOD_PUBLIC))
           sema_error(ctx, (ASTNode *)proto,
                      "cannot conform to protocol '%s' that is less "
                      "visible than the type",
@@ -371,6 +418,11 @@ static void register_result_builder(SemaContext *ctx, ASTNode *node,
   memset(be, 0, sizeof(*be));
   be->name = iname;
   be->decl = node;
+  /* Capture the builder type's own token stream so its method names resolve
+   * correctly even when used from another file (whole-module). */
+  be->src = ctx->src;
+  be->tokens = ctx->tokens;
+  be->token_count = ctx->token_count;
 
   const ASTNode *body = find_body(node);
   if (body)
@@ -439,19 +491,19 @@ static void detect_wrapper_usage(SemaContext *ctx, ASTNode *node) {
  * Simple Declaration Handlers
  * ═══════════════════════════════════════════════════════════════════════════════ */
 
-/** @brief Registers a typealias and validates access level. */
+/** @brief Registers a typealias name; defers RHS resolution to Pass 2.
+ *
+ * The aliased type may be declared in another file (or later in this one) and
+ * is not yet visible during this per-file declare sweep — only the current
+ * file's forward declarations are reachable.  Resolving the RHS here would
+ * memoize a false "use of undeclared type" placeholder in node->type, which the
+ * resolve_node guard then prevents Pass 2 (full module scope) from correcting.
+ * Register only the name; resolve_typealias_decl fills node->type later — lazily
+ * on first reference, or via the Pass-2 AST_TYPEALIAS_DECL resolution — and runs
+ * the alias-visibility check there. */
 void declare_typealias(SemaContext *ctx, ASTNode *node) {
   const char *iname = tok_intern(ctx, node->data.var.name_tok);
-  const ASTNode *rhs = find_type_child(node);
-  TypeInfo *aliased = resolve_type_annotation(ctx, rhs);
-  sema_define(ctx, iname, SYM_TYPEALIAS, aliased, node);
-
-  if (aliased) {
-    uint32_t aliased_eff = type_effective_access(ctx, aliased);
-    if (access_rank(effective_access(node->modifiers)) > access_rank(aliased_eff))
-      sema_error(ctx, node,
-                 "type alias cannot be more visible than the type it aliases");
-  }
+  sema_define(ctx, iname, SYM_TYPEALIAS, NULL, node);
 }
 
 /** @brief Imports module types and tracks @testable. */
@@ -532,7 +584,9 @@ void declare_named(SemaContext *ctx, ASTNode *node, SymbolKind sk,
     ti->kind = TY_NAMED;
     ti->named.name = iname;
     ti->named.decl = node;
-  } else if (node->kind != AST_FUNC_DECL) {
+  } else if (node->kind != AST_FUNC_DECL &&
+             node->kind != AST_VAR_DECL &&
+             node->kind != AST_LET_DECL) {
     ti = resolve_type_annotation(ctx, find_type_child(node));
   }
 
@@ -557,7 +611,7 @@ void declare_named(SemaContext *ctx, ASTNode *node, SymbolKind sk,
   detect_wrapper_usage(ctx, node);
 
   if (is_nominal)
-    declare_in_scope(ctx, node);
+    declare_nominal_in_scope(ctx, node);
   else
     declare_children(ctx, node);
 }
@@ -572,6 +626,7 @@ void declare_node(SemaContext *ctx, ASTNode *node) {
 
   switch (node->kind) {
   case AST_FUNC_DECL:     declare_named(ctx, node, SYM_FUNC, 0);     return;
+  case AST_MACRO_DECL:    declare_named(ctx, node, SYM_FUNC, 0);     return;
   case AST_VAR_DECL:      declare_named(ctx, node, SYM_VAR, 0);      return;
   case AST_LET_DECL:      declare_named(ctx, node, SYM_LET, 0);      return;
   case AST_CLASS_DECL:    declare_named(ctx, node, SYM_CLASS, 1);    return;
@@ -580,11 +635,12 @@ void declare_node(SemaContext *ctx, ASTNode *node) {
   case AST_PROTOCOL_DECL: declare_named(ctx, node, SYM_PROTOCOL, 1); return;
   case AST_ACTOR_DECL:    declare_named(ctx, node, SYM_CLASS, 1);    return;
   case AST_TYPEALIAS_DECL: declare_typealias(ctx, node);              return;
-  case AST_EXTENSION_DECL: declare_in_scope(ctx, node);               return;
+  case AST_EXTENSION_DECL: declare_extension_in_scope(ctx, node);     return;
   case AST_IMPORT_DECL:   declare_import(ctx, node);                  return;
   case AST_PRECEDENCE_GROUP_DECL: return;
   case AST_OPERATOR_DECL: declare_operator(ctx, node);                return;
   case AST_CLOSURE_EXPR:
+  case AST_CASE_CLAUSE:
   case AST_BLOCK:         declare_in_scope(ctx, node);                return;
   default: break;
   }

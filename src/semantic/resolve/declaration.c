@@ -10,16 +10,70 @@
 
 TypeInfo *resolve_node(SemaContext *ctx, ASTNode *node);
 
-/** @brief Returns 1 if the node is inside an extension (not a nested nominal type). */
+/** @brief Returns 1 if the declaration is an extension member, not a local. */
 int decl_is_inside_extension(const ASTNode *node) {
-  for (const ASTNode *p = node->parent; p; p = p->parent) {
+  for (const ASTNode *p = node ? node->parent : NULL; p; p = p->parent) {
     if (p->kind == AST_EXTENSION_DECL)
       return 1;
-    if (p->kind == AST_STRUCT_DECL || p->kind == AST_CLASS_DECL ||
+    if (p->kind == AST_BLOCK)
+      return p->parent && p->parent->kind == AST_EXTENSION_DECL;
+    if (p->kind == AST_FUNC_DECL || p->kind == AST_INIT_DECL ||
+        p->kind == AST_SUBSCRIPT_DECL || p->kind == AST_ACCESSOR_DECL ||
+        p->kind == AST_CLOSURE_EXPR || p->kind == AST_STRUCT_DECL ||
+        p->kind == AST_CLASS_DECL ||
         p->kind == AST_ENUM_DECL || p->kind == AST_ACTOR_DECL)
       return 0;
   }
   return 0;
+}
+
+static void define_generic_params_in_current_scope(SemaContext *ctx,
+                                                   ASTNode *node) {
+  for (ASTNode *c = node->first_child; c; c = c->next_sibling) {
+    if (c->kind != AST_GENERIC_PARAM)
+      continue;
+    TypeInfo *gp_ti = resolve_node(ctx, c);
+    if (!gp_ti)
+      continue;
+    const char *pname = tok_intern(ctx, c->tok_idx);
+    sema_define(ctx, pname, SYM_TYPE, gp_ti, c);
+  }
+}
+
+static TypeInfo *resolve_typealias_rhs_with_generics(SemaContext *ctx,
+                                                     ASTNode *node) {
+  sema_push_scope(ctx);
+  define_generic_params_in_current_scope(ctx, node);
+  TypeInfo *aliased = resolve_type_annotation(ctx, find_type_child(node));
+  sema_pop_scope(ctx);
+  return aliased;
+}
+
+static void define_protocol_associated_types_in_scope(SemaContext *ctx,
+                                                      ASTNode *proto) {
+  const ASTNode *body = class_decl_body(proto);
+  if (!body)
+    return;
+  for (ASTNode *req = (ASTNode *)body->first_child; req;
+       req = (ASTNode *)req->next_sibling) {
+    if (req->kind != AST_PROTOCOL_REQ ||
+        !(req->modifiers & MOD_PROTOCOL_ASSOC_TYPE) || !req->tok_idx)
+      continue;
+    const char *name = tok_intern(ctx, req->tok_idx);
+    TypeInfo *ti = req->type;
+    if (!ti) {
+      ti = type_arena_alloc(ctx->type_arena);
+      if (!ti)
+        continue;
+      ti->kind = TY_GENERIC_PARAM;
+      ti->param.name = name;
+      ti->param.index = 0;
+      ti->param.constraints = NULL;
+      ti->param.constraint_count = 0;
+      req->type = ti;
+    }
+    sema_define(ctx, name, SYM_TYPE, ti, req);
+  }
 }
 
 /**
@@ -29,8 +83,10 @@ int decl_is_inside_extension(const ASTNode *node) {
 TypeInfo *resolve_var_decl(SemaContext *ctx, ASTNode *node) {
   const char *iname = tok_intern(ctx, node->data.var.name_tok);
 
-  /* Extensions must not contain stored properties */
-  if (decl_is_inside_extension(node) && !node->data.var.is_computed) {
+  /* Extensions may not introduce instance storage. Static stored properties
+   * live on the type itself and are valid Swift. */
+  if (decl_is_inside_extension(node) && !node->data.var.is_computed &&
+      !(node->modifiers & MOD_STATIC)) {
     sema_error(ctx, node, "extensions must not contain stored properties");
     return node->type ? node->type : TY_BUILTIN_INT;
   }
@@ -81,10 +137,15 @@ TypeInfo *resolve_var_decl(SemaContext *ctx, ASTNode *node) {
     }
   }
 
-  /* Init expression type (inference) */
+  /* Init expression type (inference).  Push the annotation as the contextual
+   * type so a literal initializer adopts it (`let x: CGFloat = 5` → 5 : CGFloat,
+   * generalizing the Float-only narrowing below to every ExpressibleBy target). */
   const ASTNode *init = find_init_child(node);
 
+  TypeInfo *saved_expected = ctx->expected_type;
+  ctx->expected_type = annot_t;
   TypeInfo *init_t = resolve_node(ctx, (ASTNode *)init);
+  ctx->expected_type = saved_expected;
 
   /* Float literal inference:
    * In Swift, a float literal like 3.14 defaults to Double.
@@ -270,6 +331,8 @@ int class_decl_has_superclass(const ASTNode *decl) {
 const ASTNode *class_decl_body(const ASTNode *decl) {
   if (!decl)
     return NULL;
+  if (decl->kind == AST_PROTOCOL_DECL)
+    return decl;
   for (const ASTNode *c = decl->first_child; c; c = c->next_sibling)
     if (c->kind == AST_BLOCK)
       return c;
@@ -284,6 +347,7 @@ void define_nested_types_in_scope(SemaContext *ctx, const ASTNode *type_decl) {
   const ASTNode *body = class_decl_body(type_decl);
   if (!body)
     return;
+
   for (const ASTNode *c = body->first_child; c; c = c->next_sibling) {
     SymbolKind sk;
     if (c->kind == AST_STRUCT_DECL)
@@ -310,6 +374,156 @@ void define_nested_types_in_scope(SemaContext *ctx, const ASTNode *type_decl) {
     sema_define(ctx, short_name, sk, ti, (ASTNode *)c);
     if (ti && !((ASTNode *)c)->type)
       ((ASTNode *)c)->type = ti;
+  }
+
+  for (const ASTNode *c = body->first_child; c; c = c->next_sibling) {
+    if (c->kind != AST_TYPEALIAS_DECL || !c->data.var.name_tok)
+      continue;
+    const char *name = tok_intern(ctx, c->data.var.name_tok);
+    TypeInfo *aliased =
+        resolve_typealias_rhs_with_generics(ctx, (ASTNode *)c);
+    ((ASTNode *)c)->type = aliased;
+    sema_define(ctx, name, SYM_TYPEALIAS, aliased, (ASTNode *)c);
+  }
+}
+
+static int current_scope_has_symbol(SemaContext *ctx, const char *name) {
+  if (!ctx || !ctx->current_scope || !name)
+    return 0;
+  for (uint32_t i = 0; i < SCOPE_HASH_SIZE; i++)
+    for (Symbol *sym = ctx->current_scope->buckets[i]; sym; sym = sym->next)
+      if (sym->name == name)
+        return 1;
+  return 0;
+}
+
+static SymbolKind nominal_symbol_kind(const ASTNode *node) {
+  switch (node ? node->kind : AST_UNKNOWN) {
+  case AST_CLASS_DECL: return SYM_CLASS;
+  case AST_ENUM_DECL: return SYM_ENUM;
+  case AST_PROTOCOL_DECL: return SYM_PROTOCOL;
+  default: return SYM_STRUCT;
+  }
+}
+
+static void define_nominal_type_in_scope(SemaContext *ctx, ASTNode *node,
+                                         const char *prefix) {
+  if (!node || !node->data.var.name_tok)
+    return;
+  if (node->kind != AST_STRUCT_DECL && node->kind != AST_CLASS_DECL &&
+      node->kind != AST_ENUM_DECL && node->kind != AST_PROTOCOL_DECL)
+    return;
+
+  const char *short_name = tok_intern(ctx, node->data.var.name_tok);
+  if (!short_name || current_scope_has_symbol(ctx, short_name))
+    return;
+
+  TypeInfo *ti = node->type;
+  if (!ti) {
+    ti = type_arena_alloc(ctx->type_arena);
+    if (!ti)
+      return;
+    ti->kind = TY_NAMED;
+    if (prefix) {
+      char qbuf[256];
+      int n = snprintf(qbuf, sizeof(qbuf), "%s.%s", prefix, short_name);
+      ti->named.name = (n > 0 && (size_t)n < sizeof(qbuf))
+                           ? sema_intern(ctx, qbuf, (size_t)n)
+                           : short_name;
+    } else {
+      ti->named.name = short_name;
+    }
+    ti->named.decl = node;
+    node->type = ti;
+  }
+
+  sema_define(ctx, short_name, nominal_symbol_kind(node), ti, node);
+}
+
+static void define_typealias_in_scope(SemaContext *ctx, ASTNode *node) {
+  if (!node || node->kind != AST_TYPEALIAS_DECL || !node->data.var.name_tok)
+    return;
+  const char *name = tok_intern(ctx, node->data.var.name_tok);
+  if (!name || current_scope_has_symbol(ctx, name))
+    return;
+  TypeInfo *aliased = resolve_typealias_rhs_with_generics(ctx, node);
+  node->type = aliased;
+  sema_define(ctx, name, SYM_TYPEALIAS, aliased, node);
+}
+
+static void define_member_types_from_body(SemaContext *ctx, const ASTNode *decl,
+                                          const char *prefix) {
+  const ASTNode *body = class_decl_body(decl);
+  if (!body)
+    return;
+  for (ASTNode *m = (ASTNode *)body->first_child; m;
+       m = (ASTNode *)m->next_sibling) {
+    define_nominal_type_in_scope(ctx, m, prefix);
+    define_typealias_in_scope(ctx, m);
+  }
+}
+
+/** @brief Well-known generic parameter names for stdlib generic types, which
+ *  have no AST decl in user code (they come from the SDK vocab), so the
+ *  decl-based extension binding can't find them.  Lets
+ *  `extension Optional { … Wrapped … }` resolve the parameter instead of
+ *  reporting `use of undeclared type 'Wrapped'`.  Returns the count (0–2). */
+static int stdlib_generic_param_names(const char *type_name, const char *out[2]) {
+  if (!type_name) return 0;
+  if (!strcmp(type_name, "Optional")) { out[0] = "Wrapped"; return 1; }
+  if (!strcmp(type_name, "Result")) {
+    out[0] = "Success"; out[1] = "Failure"; return 2;
+  }
+  if (!strcmp(type_name, "Dictionary")) {
+    out[0] = "Key"; out[1] = "Value"; return 2;
+  }
+  if (!strcmp(type_name, "Array") || !strcmp(type_name, "ContiguousArray") ||
+      !strcmp(type_name, "ArraySlice") || !strcmp(type_name, "Set")) {
+    out[0] = "Element"; return 1;
+  }
+  if (!strcmp(type_name, "Range") || !strcmp(type_name, "ClosedRange") ||
+      !strcmp(type_name, "PartialRangeFrom") ||
+      !strcmp(type_name, "PartialRangeUpTo") ||
+      !strcmp(type_name, "PartialRangeThrough")) {
+    out[0] = "Bound"; return 1;
+  }
+  return 0;
+}
+
+static void define_extension_member_types_in_scope(SemaContext *ctx,
+                                                   ASTNode *extension_decl) {
+  if (!ctx || !extension_decl || !extension_decl->data.var.name_tok)
+    return;
+  const char *target = tok_intern(ctx, extension_decl->data.var.name_tok);
+  if (!target || !ctx->ast_root)
+    return;
+
+  Symbol *target_sym = sema_lookup(ctx, target);
+  if (target_sym && target_sym->type && target_sym->type->kind == TY_NAMED &&
+      target_sym->type->named.decl) {
+    /* The target type may be declared in a DIFFERENT file of the module than
+     * this extension.  define_member_types_from_body reads each nested type's
+     * name token via tok_intern, which indexes the CURRENT file's tokens — so
+     * without switching to the target's origin file, a nested `enum X` from
+     * another file is read against this file's tokens and gets the wrong name
+     * (then `X` stays "use of undeclared type" in the extension).  Enter the
+     * target decl's origin so its tokens resolve correctly. */
+    const ASTNode *tdecl = (const ASTNode *)target_sym->type->named.decl;
+    SemaOriginState ost;
+    int sw = sema_origin_enter(ctx, tdecl, &ost);
+    define_member_types_from_body(ctx, tdecl, target);
+    if (sw)
+      sema_origin_leave(ctx, &ost);
+  }
+
+  for (ASTNode *ext = (ASTNode *)ctx->ast_root->first_child; ext;
+       ext = (ASTNode *)ext->next_sibling) {
+    if (ext->kind != AST_EXTENSION_DECL || !ext->data.var.name_tok)
+      continue;
+    const char *ext_target = tok_intern(ctx, ext->data.var.name_tok);
+    if (ext_target != target)
+      continue;
+    define_member_types_from_body(ctx, ext, target);
   }
 }
 
@@ -491,8 +705,9 @@ uint32_t class_stored_property_names(SemaContext *ctx,
 
 /* Get superclass AST decl from class decl (first type in conformance).
  * Returns NULL if no superclass. */
-const ASTNode *class_superclass_decl(SemaContext *ctx,
-                                     const ASTNode *class_decl) {
+/* Resolve the immediate superclass decl (one step up), no cycle handling. */
+static const ASTNode *immediate_superclass_decl(SemaContext *ctx,
+                                                const ASTNode *class_decl) {
   if (!class_decl || class_decl->kind != AST_CLASS_DECL)
     return NULL;
   const ASTNode *conf = NULL;
@@ -514,6 +729,62 @@ const ASTNode *class_superclass_decl(SemaContext *ctx,
   if (super_decl->kind != AST_CLASS_DECL)
     return NULL;
   return super_decl;
+}
+
+const ASTNode *class_superclass_decl(SemaContext *ctx,
+                                     const ASTNode *class_decl) {
+  const ASTNode *super = immediate_superclass_decl(ctx, class_decl);
+  if (!super)
+    return NULL;
+  /* Inheritance-cycle guard: a class that transitively inherits from itself
+   * (`class A : C; class C : B; class B : A`) has no *valid* superclass — the
+   * cycle is a separate diagnostic. Without this, every superclass-chain
+   * walker (init lookup, inherited-stored-property, …) recurses infinitely
+   * and the frontend stack-overflows. Walk up from `super`; if the chain
+   * revisits `class_decl` (or any node), break it by reporting no superclass. */
+  const ASTNode *seen[128];
+  int ns = 0;
+  seen[ns++] = class_decl;
+  for (const ASTNode *walk = super; walk;
+       walk = immediate_superclass_decl(ctx, walk)) {
+    for (int i = 0; i < ns; i++)
+      if (seen[i] == walk)
+        return NULL; /* cycle */
+    if (ns >= (int)(sizeof(seen) / sizeof(seen[0])))
+      return NULL; /* pathologically deep — bail rather than risk overflow */
+    seen[ns++] = walk;
+  }
+  return super;
+}
+
+int class_has_unresolved_superclass(SemaContext *ctx, const ASTNode *class_decl) {
+  if (!class_decl || class_decl->kind != AST_CLASS_DECL)
+    return 0;
+  const ASTNode *conf = NULL;
+  for (const ASTNode *c = class_decl->first_child; c; c = c->next_sibling) {
+    if (c->kind == AST_BLOCK)
+      break;
+    if (c->kind == AST_CONFORMANCE) {
+      conf = c;
+      break;
+    }
+  }
+  if (!conf || !conf->first_child)
+    return 0;
+  TypeInfo *super_t =
+      resolve_type_annotation(ctx, (ASTNode *)conf->first_child);
+  if (super_t && super_t->kind == TY_NAMED) {
+    /* If the superclass symbol lookup has no decl, it is unresolved */
+    if (!super_t->named.decl) {
+      return 1;
+    }
+    /* Recursively check superclass */
+    const ASTNode *super_decl = (const ASTNode *)super_t->named.decl;
+    if (super_decl->kind == AST_CLASS_DECL) {
+      return class_has_unresolved_superclass(ctx, super_decl);
+    }
+  }
+  return 0;
 }
 
 /* Return 1 if prop_name is a stored property of a superclass of
@@ -622,6 +893,22 @@ int superclass_has_required_init_with_param_count(SemaContext *ctx,
 
 /* Return 1 if class has an available init that takes param_count
  * arguments (own or inherited per 2 rules). */
+/* The class's inheritance clause leads with a named type we can't resolve to a
+ * local declaration — by Swift convention the superclass comes first, so this is
+ * very likely an SDK/base class (NSView, NSObject, …) whose initializers are
+ * invisible to us.  Used to stay lenient instead of flagging a missing init. */
+static int class_inherits_unresolved(SemaContext *ctx, const ASTNode *class_decl) {
+  if (!class_decl || class_decl->kind != AST_CLASS_DECL) return 0;
+  const ASTNode *conf = NULL;
+  for (const ASTNode *c = class_decl->first_child; c; c = c->next_sibling) {
+    if (c->kind == AST_BLOCK) break;
+    if (c->kind == AST_CONFORMANCE) { conf = c; break; }
+  }
+  if (!conf || !conf->first_child) return 0;
+  TypeInfo *t = resolve_type_annotation(ctx, (ASTNode *)conf->first_child);
+  return t && t->kind == TY_NAMED && !t->named.decl;
+}
+
 int class_has_init_with_param_count(SemaContext *ctx, const ASTNode *class_decl,
                                     uint32_t param_count) {
   uint32_t designated[16], convenience[16];
@@ -629,11 +916,15 @@ int class_has_init_with_param_count(SemaContext *ctx, const ASTNode *class_decl,
       class_designated_init_param_counts(ctx, class_decl, designated, 16);
   uint32_t nc =
       class_convenience_init_param_counts(ctx, class_decl, convenience, 16);
+  /* `>=` not `==`: an init with more parameters than arguments is callable when
+   * the surplus have default values (`init(a:, b: Int = 0)` called as `T(a:)`).
+   * We don't track which params have defaults, so assume they might rather than
+   * flag a false "no matching initializer". */
   for (uint32_t i = 0; i < nd; i++)
-    if (designated[i] == param_count)
+    if (designated[i] >= param_count)
       return 1;
   for (uint32_t i = 0; i < nc; i++)
-    if (convenience[i] == param_count)
+    if (convenience[i] >= param_count)
       return 1;
   const ASTNode *super = class_superclass_decl(ctx, class_decl);
   if (!super) {
@@ -641,6 +932,10 @@ int class_has_init_with_param_count(SemaContext *ctx, const ASTNode *class_decl,
      * default zero-arg init (Swift synthesizes init() when all stored
      * properties have defaults). */
     if (nd == 0 && nc == 0 && param_count == 0)
+      return 1;
+    /* Declares a superclass we can't resolve (SDK/base class): its inits are
+     * invisible, so don't claim none matches. */
+    if (class_inherits_unresolved(ctx, class_decl))
       return 1;
     return 0;
   }
@@ -668,7 +963,7 @@ int class_has_init_with_param_count(SemaContext *ctx, const ASTNode *class_decl,
   }
   if (inherit_all_designated)
     for (uint32_t i = 0; i < sd; i++)
-      if (super_designated[i] == param_count)
+      if (super_designated[i] >= param_count)
         return 1;
   /* If subclass has no explicit inits and we're looking for zero-arg init,
    * check if superclass has one (explicit or implicit, recursively). */
@@ -677,7 +972,7 @@ int class_has_init_with_param_count(SemaContext *ctx, const ASTNode *class_decl,
       return 1;
   if (implements_all_designated)
     for (uint32_t i = 0; i < sc; i++)
-      if (super_convenience[i] == param_count)
+      if (super_convenience[i] >= param_count)
         return 1;
   return 0;
 }
@@ -689,8 +984,9 @@ void apply_preceding_main_actor(SemaContext *ctx, ASTNode *node) {
   if (!node) return;
   for (const ASTNode *c = node->first_child; c; c = c->next_sibling) {
     if (c->kind != AST_ATTRIBUTE) continue;
-    const Token *at = &ctx->tokens[c->data.var.name_tok];
-    const char *attr_name = sema_intern(ctx, ctx->src->data + at->pos, at->len);
+    /* tok_intern bounds-checks tok_idx; a foreign file's attribute node (whole-
+     * module) would otherwise index this file's tokens/source out of bounds. */
+    const char *attr_name = tok_intern(ctx, c->data.var.name_tok);
     if (attr_name && strcmp(attr_name, SW_ATTR_MAIN_ACTOR) == 0) {
       node->modifiers |= MOD_MAIN_ACTOR;
       return;
@@ -701,12 +997,100 @@ void apply_preceding_main_actor(SemaContext *ctx, ASTNode *node) {
        sib = sib->next_sibling) {
     if (sib->next_sibling != node) continue;
     if (sib->kind != AST_ATTRIBUTE) break;
-    const Token *at = &ctx->tokens[sib->data.var.name_tok];
-    const char *attr_name = sema_intern(ctx, ctx->src->data + at->pos, at->len);
+    const char *attr_name = tok_intern(ctx, sib->data.var.name_tok);
     if (attr_name && strcmp(attr_name, SW_ATTR_MAIN_ACTOR) == 0)
       node->modifiers |= MOD_MAIN_ACTOR;
     break;
   }
+}
+
+/* Well-known Apple-framework protocols / base classes whose conformers are
+ * implicitly @MainActor-isolated: SwiftUI view/scene construction, UIKit/AppKit
+ * UI objects. General framework knowledge (like the literal-protocol implication
+ * table), not a per-project list. */
+static int name_is_main_actor_anchor(const char *n) {
+  if (!n) return 0;
+  static const char *const anchors[] = {
+      /* SwiftUI */
+      "View", "App", "Scene", "ViewModifier", "Commands", "ToolbarContent",
+      "CustomizableToolbarContent", "WidgetConfiguration", "DynamicProperty",
+      "PreviewProvider", "TableRowContent", "UIViewRepresentable",
+      "UIViewControllerRepresentable", "NSViewRepresentable",
+      "NSViewControllerRepresentable", "WKInterfaceObjectRepresentable",
+      /* UIKit */
+      "UIViewController", "UIView", "UIResponder", "UIControl", "UIWindow",
+      "UIApplicationDelegate", "UISceneDelegate", "UIWindowSceneDelegate",
+      "UICollectionViewCell", "UITableViewCell", "UITableViewHeaderFooterView",
+      "UICollectionReusableView", "UIGestureRecognizer", "UIScrollView",
+      /* AppKit */
+      "NSViewController", "NSView", "NSResponder", "NSWindowController",
+      "NSWindowDelegate", "NSApplicationDelegate", "NSWindow",
+      /* WatchKit */
+      "WKInterfaceController", "WKExtensionDelegate",
+  };
+  for (size_t i = 0; i < sizeof(anchors) / sizeof(anchors[0]); i++)
+    if (strcmp(n, anchors[i]) == 0)
+      return 1;
+  return 0;
+}
+
+static int type_decl_main_actor_rec(SemaContext *ctx, const ASTNode *td,
+                                    int depth) {
+  if (!td || depth > 6)
+    return 0;
+  if (td->kind != AST_STRUCT_DECL && td->kind != AST_CLASS_DECL &&
+      td->kind != AST_ENUM_DECL && td->kind != AST_ACTOR_DECL)
+    return 0;
+  if (td->modifiers & MOD_MAIN_ACTOR)
+    return 1;
+
+  /* Read this decl's own attribute/conformance tokens against ITS stream — it
+   * may live in another file under whole-module analysis.  Name-only scan: no
+   * resolve_type_annotation (it would emit spurious "undeclared type"
+   * diagnostics from this resolution phase). */
+  SemaOriginState ost;
+  int sw = sema_origin_enter(ctx, td, &ost);
+  int hit = 0;
+  const char *super_name = NULL; /* first inheritance-clause entry (superclass) */
+  for (const ASTNode *c = td->first_child; c && !hit; c = c->next_sibling) {
+    if (c->kind == AST_ATTRIBUTE) {
+      const char *an = tok_intern(ctx, c->data.var.name_tok);
+      if (an && strcmp(an, SW_ATTR_MAIN_ACTOR) == 0)
+        hit = 1;
+    } else if (c->kind == AST_CONFORMANCE) {
+      for (const ASTNode *p = c->first_child; p; p = p->next_sibling) {
+        if (!p->tok_idx)
+          continue;
+        const char *pn = tok_intern(ctx, p->tok_idx);
+        if (!pn)
+          continue;
+        if (!super_name)
+          super_name = pn; /* Swift requires the superclass to be listed first */
+        if (name_is_main_actor_anchor(pn)) {
+          hit = 1;
+          break;
+        }
+      }
+    }
+  }
+  if (sw)
+    sema_origin_leave(ctx, &ost);
+  if (hit)
+    return 1;
+
+  /* A subclass of a main-actor base class (e.g. class Foo: MyBaseVC where
+   * MyBaseVC: UIViewController) is also main-actor-isolated.  Follow the
+   * superclass by NAME via the symbol table (no type-annotation resolution). */
+  if (td->kind == AST_CLASS_DECL && super_name) {
+    Symbol *s = sema_lookup(ctx, super_name);
+    if (s && s->decl && s->decl != td && s->decl->kind == AST_CLASS_DECL)
+      return type_decl_main_actor_rec(ctx, s->decl, depth + 1);
+  }
+  return 0;
+}
+
+int type_decl_is_main_actor_isolated(SemaContext *ctx, const ASTNode *td) {
+  return type_decl_main_actor_rec(ctx, td, 0);
 }
 
 /**
@@ -719,6 +1103,8 @@ TypeInfo *resolve_func_decl(SemaContext *ctx, ASTNode *node) {
   /* Resolve return type annotation FIRST (before body) */
   TypeInfo *ret_t = NULL;
   ASTNode *ret_type_node = NULL;
+  sema_push_scope(ctx);
+  define_generic_params_in_current_scope(ctx, node);
   for (ASTNode *c = node->first_child; c; c = c->next_sibling) {
     if (c->kind >= AST_TYPE_IDENT &&
         (c->kind <= AST_TYPE_ANY || c->kind == AST_TYPE_COMPOSITION)) {
@@ -727,6 +1113,7 @@ TypeInfo *resolve_func_decl(SemaContext *ctx, ASTNode *node) {
       break;
     }
   }
+  sema_pop_scope(ctx);
   /* some P -> opaque return; enforce single concrete return type */
   TypeInfo *saved_opaque_constraint = ctx->opaque_return_constraint;
   TypeInfo *saved_opaque_first = ctx->opaque_return_first_type;
@@ -825,15 +1212,28 @@ TypeInfo *resolve_func_decl(SemaContext *ctx, ASTNode *node) {
       ctx->current_isolation_main_actor = 1;
     /* Inherit from enclosing type if not already set */
     const ASTNode *enclosing_type = NULL;
+    const ASTNode *enclosing_ext = NULL;
     for (const ASTNode *p = node->parent; p; p = p->parent) {
       if (p->kind == AST_STRUCT_DECL || p->kind == AST_CLASS_DECL ||
           p->kind == AST_ACTOR_DECL || p->kind == AST_ENUM_DECL) {
         enclosing_type = p;
         break;
       }
+      if (p->kind == AST_EXTENSION_DECL) {
+        enclosing_ext = p;
+        break;
+      }
+    }
+    /* A method declared in `extension T { … }` inherits T's isolation; resolve
+     * the extended type's decl (it may live in another file). */
+    if (!enclosing_type && enclosing_ext && enclosing_ext->data.var.name_tok) {
+      const char *en = tok_intern(ctx, enclosing_ext->data.var.name_tok);
+      Symbol *es = en ? sema_lookup(ctx, en) : NULL;
+      if (es && es->type && es->type->kind == TY_NAMED && es->type->named.decl)
+        enclosing_type = (const ASTNode *)es->type->named.decl;
     }
     if (enclosing_type) {
-      if (enclosing_type->modifiers & MOD_MAIN_ACTOR)
+      if (type_decl_is_main_actor_isolated(ctx, enclosing_type))
         ctx->current_isolation_main_actor = 1;
       if (enclosing_type->kind == AST_ACTOR_DECL)
         ctx->current_actor_decl = enclosing_type;
@@ -1018,9 +1418,21 @@ TypeInfo *resolve_node_decl(SemaContext *ctx, ASTNode *node) {
           (node->type && node->type->kind == TY_NAMED && node->type->named.name)
               ? node->type->named.name
               : nominal;
+      define_nominal_type_in_scope(ctx, node, NULL);
+      define_generic_params_in_current_scope(ctx, node);
       define_nested_types_in_scope(ctx, node);
+    } else {
+      define_protocol_associated_types_in_scope(ctx, node);
     }
+    /* Property initializers (resolved here, not inside a func) run in the
+     * type's isolation domain — set it so e.g. a @MainActor / SwiftUI-View
+     * type's defaults can reach main-actor members. */
+    uint8_t saved_iso = ctx->current_isolation_main_actor;
+    if (node->kind != AST_PROTOCOL_DECL)
+      ctx->current_isolation_main_actor =
+          type_decl_is_main_actor_isolated(ctx, node) ? 1 : 0;
     resolve_children(ctx, node);
+    ctx->current_isolation_main_actor = saved_iso;
     ctx->current_type_name = saved_type;
     if (node->kind == AST_ENUM_DECL)
       check_enum_case_values_access(ctx, node);
@@ -1041,8 +1453,13 @@ TypeInfo *resolve_node_decl(SemaContext *ctx, ASTNode *node) {
               ? node->type->named.name
               : nominal;
     }
+    define_nominal_type_in_scope(ctx, node, NULL);
+    define_generic_params_in_current_scope(ctx, node);
     define_nested_types_in_scope(ctx, node);
     int has_super = class_decl_has_superclass(node);
+    uint8_t saved_iso = ctx->current_isolation_main_actor;
+    ctx->current_isolation_main_actor =
+        type_decl_is_main_actor_isolated(ctx, node) ? 1 : 0;
     for (ASTNode *c = node->first_child; c; c = c->next_sibling) {
       if (c->kind == AST_INIT_DECL) {
         ctx->init_class_decl = node;
@@ -1075,6 +1492,7 @@ TypeInfo *resolve_node_decl(SemaContext *ctx, ASTNode *node) {
                        (unsigned)required[i]);
       }
     }
+    ctx->current_isolation_main_actor = saved_iso;
     ctx->current_type_name = saved_type;
     sema_pop_scope(ctx);
     return NULL;
@@ -1121,6 +1539,8 @@ TypeInfo *resolve_node_decl(SemaContext *ctx, ASTNode *node) {
         if (ext_decl->kind == AST_STRUCT_DECL ||
             ext_decl->kind == AST_CLASS_DECL ||
             ext_decl->kind == AST_ENUM_DECL) {
+          SemaOriginState ost;
+          int sw = sema_origin_enter(ctx, ext_decl, &ost);
           for (ASTNode *c = (ASTNode *)ext_decl->first_child; c;
                c = (ASTNode *)c->next_sibling) {
             if (c->kind != AST_GENERIC_PARAM)
@@ -1135,9 +1555,27 @@ TypeInfo *resolve_node_decl(SemaContext *ctx, ASTNode *node) {
             c->type = gp_ti;
             sema_define(ctx, pname, SYM_TYPE, gp_ti, c);
           }
+          if (sw) sema_origin_leave(ctx, &ost);
         }
       }
+      /* Stdlib generic types (Optional/Result/Array/Dictionary/Range/…) have no
+       * AST decl, so the loop above can't bind their parameters.  Bind the
+       * well-known names so `extension Optional { … Wrapped … }` resolves. */
+      const char *gp_names[2] = {0, 0};
+      int ngp = stdlib_generic_param_names(ext_name, gp_names);
+      for (int gi = 0; gi < ngp; gi++) {
+        const char *pname =
+            sema_intern(ctx, gp_names[gi], strlen(gp_names[gi]));
+        TypeInfo *gp_ti = type_arena_alloc(ctx->type_arena);
+        gp_ti->kind = TY_GENERIC_PARAM;
+        gp_ti->param.name = pname;
+        gp_ti->param.index = (uint32_t)gi;
+        gp_ti->param.constraints = NULL;
+        gp_ti->param.constraint_count = 0;
+        sema_define(ctx, pname, SYM_TYPE, gp_ti, node);
+      }
     }
+    define_extension_member_types_in_scope(ctx, node);
     resolve_children(ctx, node);
     if (node->data.var.name_tok) {
       const char *ext_name = tok_intern(ctx, node->data.var.name_tok);

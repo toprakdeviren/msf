@@ -26,18 +26,69 @@
  * @param deep  If 1, also compare TY_GENERIC_PARAM index fields.
  * @return      1 if equal, 0 otherwise.
  */
+/* Canonical nominal name of a stdlib type — whether it is represented
+ * structurally (kind TY_STRING/TY_ARRAY/…) or resolved by name (TY_NAMED
+ * "String"/"Array"…).  Lets `[Message]` match an untyped `Array(...)` that came
+ * back as TY_NAMED "Array".  NULL for types without such a canonical name. */
+static const char *scalar_nominal_name(const TypeInfo *t) {
+  switch (t->kind) {
+  case TY_ARRAY:       return "Array";
+  case TY_SET:         return "Set";
+  case TY_DICT:        return "Dictionary";
+  case TY_VOID:        return "Void";
+  case TY_BOOL:        return "Bool";
+  case TY_INT:         return "Int";
+  case TY_INT8:        return "Int8";
+  case TY_INT16:       return "Int16";
+  case TY_INT32:       return "Int32";
+  case TY_INT64:       return "Int64";
+  case TY_UINT:        return "UInt";
+  case TY_UINT8:       return "UInt8";
+  case TY_UINT16:      return "UInt16";
+  case TY_UINT32:      return "UInt32";
+  case TY_UINT64:      return "UInt64";
+  case TY_FLOAT:       return "Float";
+  case TY_DOUBLE:      return "Double";
+  case TY_STRING:      return "String";
+  case TY_CHARACTER:   return "Character";
+  case TY_DATA:        return "Data";
+  case TY_SUBSTRING:   return "Substring";
+  case TY_NAMED:       return t->named.name;
+  default:             return NULL;
+  }
+}
+
 static int type_cmp(const TypeInfo *a, const TypeInfo *b, int deep) {
   if (!a || !b)
     return a == b;
-  if (a->kind != b->kind)
-    return 0;
+  if (a->kind != b->kind) {
+    /* A stdlib scalar is the same type whether it arrived as a builtin
+     * singleton (TY_STRING/TY_INT/…) or was resolved by name (TY_NAMED
+     * "String"/"Int"…) — e.g. `label ?? "x"` where the optional's inner is the
+     * builtin String but the literal/init result is a named String.  They print
+     * identically; treat matching names as equal. */
+    const char *an = scalar_nominal_name(a), *bn = scalar_nominal_name(b);
+    return (an && bn && strcmp(an, bn) == 0) ? 1 : 0;
+  }
   switch (a->kind) {
   case TY_ARRAY:
   case TY_OPTIONAL:
   case TY_SET:
+    /* If either element type is unknown/unresolved (e.g. `Array(x.joined())`
+     * or `[]` whose element msf couldn't infer), don't disprove the match — a
+     * concrete `[Message]` vs an untyped `Array` is otherwise a false mismatch. */
+    if (!a->inner || !b->inner ||
+        a->inner->kind == TY_UNKNOWN || b->inner->kind == TY_UNKNOWN)
+      return 1;
     return type_cmp(a->inner, b->inner, deep);
   case TY_NAMED:
-    return a->named.name == b->named.name; /* interned: pointer equality */
+    /* Interned names compare by pointer; fall back to strcmp because vocab-
+     * derived names (SDK types like Locale/TimeZone from a member signature)
+     * are not always interned in the same pool as source-token names — equal
+     * spellings must still compare equal (name-based nominal typing). */
+    if (a->named.name == b->named.name) return 1;
+    return a->named.name && b->named.name &&
+           strcmp(a->named.name, b->named.name) == 0;
   case TY_GENERIC_PARAM:
     if (!a->param.name || !b->param.name)
       return 0;

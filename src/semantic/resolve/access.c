@@ -71,6 +71,27 @@ uint32_t type_effective_access(SemaContext *ctx, TypeInfo *ty) {
   if (!ty)
     return MOD_INTERNAL;
   switch (ty->kind) {
+  case TY_VOID:
+  case TY_BOOL:
+  case TY_INT:
+  case TY_INT8:
+  case TY_INT16:
+  case TY_INT32:
+  case TY_INT64:
+  case TY_UINT:
+  case TY_UINT8:
+  case TY_UINT16:
+  case TY_UINT32:
+  case TY_UINT64:
+  case TY_FLOAT:
+  case TY_DOUBLE:
+  case TY_STRING:
+  case TY_CHARACTER:
+  case TY_JSONENCODER:
+  case TY_JSONDECODER:
+  case TY_DATA:
+  case TY_SUBSTRING:
+    return MOD_PUBLIC;
   case TY_TUPLE: {
     uint32_t acc = MOD_PUBLIC;
     for (size_t i = 0; i < ty->tuple.elem_count && ty->tuple.elems; i++)
@@ -86,6 +107,10 @@ uint32_t type_effective_access(SemaContext *ctx, TypeInfo *ty) {
     return acc;
   }
   case TY_NAMED: {
+    if (ty->named.name &&
+        (!strcmp(ty->named.name, SW_TYPE_ANY) ||
+         !strcmp(ty->named.name, SW_TYPE_ANY_OBJECT)))
+      return MOD_PUBLIC;
     if (ty->named.decl) {
       const ASTNode *decl = (const ASTNode *)ty->named.decl;
       uint32_t m = decl->modifiers & ACCESS_MODIFIER_MASK;
@@ -117,7 +142,7 @@ uint32_t type_effective_access(SemaContext *ctx, TypeInfo *ty) {
     return acc;
   }
   case TY_GENERIC_PARAM: {
-    uint32_t acc = MOD_INTERNAL;
+    uint32_t acc = MOD_PUBLIC;
     if (ty->param.constraints)
       for (uint32_t i = 0; i < ty->param.constraint_count; i++) {
         if (ty->param.constraints[i].kind != TC_CONFORMANCE ||

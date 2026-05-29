@@ -555,6 +555,32 @@ static void test_reg_deep_parens_dont_crash(void) {
   TEST_PASS();
 }
 
+static void test_reg_compound_name_no_runaway(void) {
+  TEST("REG: compound-name ref `f(label:)` doesn't swallow following decls");
+  /* `String.init(cString:)` etc. are unapplied references: a label with no
+   * value.  The arg-list parser used to leave nothing for the expression
+   * parser and then consume the closing ')' as a progress guard, turning the
+   * rest of the file into one runaway argument list.  The struct after the
+   * body must survive as a top-level sibling. */
+  RegPipeline p;
+  reg_run(&p,
+          "func f() {\n"
+          "  let g = String.init(cString:)\n"
+          "  h(other(a:b:))\n"
+          "  let k: Int = .init(value:)\n"
+          "}\n"
+          "struct Sentinel {}\n");
+  int saw_func = 0, saw_struct = 0;
+  AST_FOREACH_CHILD(p.root, c) {
+    if (c->kind == AST_FUNC_DECL)   saw_func = 1;
+    if (c->kind == AST_STRUCT_DECL) saw_struct = 1;
+  }
+  ASSERT(saw_func);
+  ASSERT(saw_struct); /* would be swallowed into f()'s body before the fix */
+  reg_free(&p);
+  TEST_PASS();
+}
+
 /* ── Runner ───────────────────────────────────────────────────────────────── */
 
 void run_regression_tests(void) {
@@ -588,6 +614,7 @@ void run_regression_tests(void) {
   test_reg_lexer_diag_reaches_result();
   /* Parser robustness */
   test_reg_deep_parens_dont_crash();
+  test_reg_compound_name_no_runaway();
   /* Lexer correctness */
   test_reg_division_not_regex();
 }

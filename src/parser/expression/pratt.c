@@ -4,6 +4,8 @@
  */
 #include "../private.h"
 
+#define RANGE_EXPR_POSTFIX (1u << 17)
+
 /** @brief Returns 1 if the current token is an assignment-flavored infix
  *  operator (`=`, `+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `|=`, `^=`).  These
  *  share precedence-climb mechanics with other infix operators but emit
@@ -17,6 +19,10 @@ static int p_is_assign_op(const Parser *p) {
     case OP_MUL_ASSIGN: case OP_DIV_ASSIGN:
     case OP_MOD_ASSIGN: case OP_AND_ASSIGN:
     case OP_OR_ASSIGN:  case OP_XOR_ASSIGN:
+    case OP_SHL_ASSIGN: case OP_SHR_ASSIGN:
+    case OP_WRAP_ADD_ASSIGN: case OP_WRAP_SUB_ASSIGN:
+    case OP_WRAP_MUL_ASSIGN:
+    case OP_MASK_SHL_ASSIGN: case OP_MASK_SHR_ASSIGN:
       return 1;
     case OP_NONE:
       /* Bare '=' is single-char.  Differentiate from '==' (OP_EQ). */
@@ -24,6 +30,23 @@ static int p_is_assign_op(const Parser *p) {
     default:
       return 0;
   }
+}
+
+static int p_is_range_op_token(const Token *t) {
+  return t && t->type == TOK_OPERATOR &&
+         (t->op_kind == OP_RANGE_INCL || t->op_kind == OP_RANGE_EXCL);
+}
+
+static int p_range_rhs_is_missing(const Parser *p) {
+  const Token *t = p_tok(p);
+  if (t->type == TOK_EOF || t->has_leading_newline)
+    return 1;
+  if (t->type == TOK_PUNCT) {
+    char c = p->src->data[t->pos];
+    return c == ')' || c == ']' || c == '}' || c == ',' || c == ';' ||
+           c == ':';
+  }
+  return 0;
 }
 
 /**
@@ -78,8 +101,11 @@ ASTNode *parse_expr_pratt(Parser *p, int min_prec) {
       adv(p);
       /* as? as! as */
       if (!p_is_eof(p) && (p->src->data[p_tok(p)->pos] == '?' ||
-                           p->src->data[p_tok(p)->pos] == '!'))
+                           p->src->data[p_tok(p)->pos] == '!')) {
+        if (p->src->data[p_tok(p)->pos] == '?')
+          cast->modifiers |= MOD_WEAK;
         adv(p);
+      }
       ast_add_child(cast, lhs);
       ASTNode *rhs = parse_type(p);
       if (rhs)
@@ -97,7 +123,16 @@ ASTNode *parse_expr_pratt(Parser *p, int min_prec) {
     ASTNode *bin = alloc_node(p, bin_kind);
     if (!bin) { lhs = NULL; goto done; }
     bin->data.binary.op_tok = (uint32_t)p->pos;
+    int is_postfix_range = p_is_range_op_token(p_tok(p));
     adv(p); /* operator */
+    if (bin_kind == AST_BINARY_EXPR && is_postfix_range &&
+        p_range_rhs_is_missing(p)) {
+      bin->modifiers |= RANGE_EXPR_POSTFIX;
+      ast_add_child(bin, lhs);
+      bin->tok_end = (uint32_t)p->pos;
+      lhs = bin;
+      continue;
+    }
     ASTNode *rhs = parse_expr_pratt(p, pr.rbp);
     if (rhs) {
       ast_add_child(bin, lhs);

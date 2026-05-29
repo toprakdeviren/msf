@@ -28,7 +28,6 @@
 #define SW_TYPE_FLOAT32 "Float32"
 #define SW_TYPE_FLOAT64 "Float64"
 #define SW_TYPE_DOUBLE "Double"
-#define SW_TYPE_CGFLOAT "CGFloat"
 #define SW_TYPE_STRING "String"
 #define SW_TYPE_CHARACTER "Character"
 
@@ -45,7 +44,24 @@
 #define SW_PROTO_SENDABLE     "Sendable"
 #define SW_PROTO_CUSTOM_STR   "CustomStringConvertible"
 #define SW_PROTO_ERROR        "Error"
-#define SW_PROTO_VIEW         "View"
+/* Numeric / arithmetic protocol family (stdlib) — valid generic constraints. */
+#define SW_PROTO_ADDITIVE_ARITHMETIC "AdditiveArithmetic"
+#define SW_PROTO_NUMERIC             "Numeric"
+#define SW_PROTO_SIGNED_NUMERIC      "SignedNumeric"
+#define SW_PROTO_BINARY_INTEGER      "BinaryInteger"
+#define SW_PROTO_FIXED_WIDTH_INTEGER "FixedWidthInteger"
+#define SW_PROTO_SIGNED_INTEGER      "SignedInteger"
+#define SW_PROTO_UNSIGNED_INTEGER    "UnsignedInteger"
+#define SW_PROTO_FLOATING_POINT      "FloatingPoint"
+#define SW_PROTO_BINARY_FLOATING_PT  "BinaryFloatingPoint"
+#define SW_PROTO_STRIDEABLE          "Strideable"
+/* ExpressibleBy*Literal family — drive literal coercion (a literal adopts any
+ * target type that conforms to its corresponding protocol). */
+#define SW_PROTO_EXPR_BY_INT_LIT     "ExpressibleByIntegerLiteral"
+#define SW_PROTO_EXPR_BY_FLOAT_LIT   "ExpressibleByFloatLiteral"
+#define SW_PROTO_EXPR_BY_BOOL_LIT    "ExpressibleByBooleanLiteral"
+#define SW_PROTO_EXPR_BY_STRING_LIT  "ExpressibleByStringLiteral"
+#define SW_PROTO_EXPR_BY_NIL_LIT     "ExpressibleByNilLiteral"
 
 /* ── Special type names ────────────────────────────────────────────────────── */
 #define SW_TYPE_SELF          "Self"
@@ -162,6 +178,8 @@
 #define BN_STR_REPLACE_SUBRANGE "__str_replace_subrange"
 #define BN_STR_UTF8_COUNT      "__str_utf8_count"
 #define BN_STR_UTF16_COUNT     "__str_utf16_count"
+#define BN_STR_ADDING_PERCENT_ENCODING "__str_adding_percent_encoding"
+#define BN_STR_REMOVING_PERCENT_ENCODING "__str_removing_percent_encoding"
 #define BN_SUBSTR_INIT       "__substr_init"
 #define BN_SUBSTR_TO_STRING    "__substr_to_string"
 #define BN_STR_DROP_FIRST_SUB  "__str_drop_first_sub"
@@ -192,6 +210,18 @@
 #define BN_DATA_GET_BYTE       "__data_get_byte"
 #define BN_DATA_BASE64_ENC     "__data_base64_encode"
 #define BN_DATA_BASE64_DEC     "__data_base64_decode"
+#define BN_DATA_READ_FILE      "__data_read_file"
+#define BN_DATA_WRITE_FILE     "__data_write_file"
+#define BN_DATA_INIT_REPEATING "__data_init_repeating"
+#define BN_DATA_INIT_CAPACITY  "__data_init_capacity"
+#define BN_DATA_RESERVE_CAPACITY "__data_reserve_capacity"
+#define BN_DATA_RESET_BYTES    "__data_reset_bytes"
+#define BN_DATA_EQUAL          "__data_equal"
+#define BN_FM_CURRENT_DIRECTORY "__fm_current_directory"
+#define BN_FM_FILE_EXISTS       "__fm_file_exists"
+#define BN_FM_CREATE_DIRECTORY  "__fm_create_directory"
+#define BN_FM_REMOVE_ITEM       "__fm_remove_item"
+#define BN_FM_CONTENTS          "__fm_contents"
 
 /* ── Alarm host builtins (__alarm_*) ───────────────────────────────────────── */
 #define BN_ALARM_SCHEDULE       "__alarm_schedule"
@@ -246,6 +276,8 @@
 #define BN_ANY_GET_TAG         "__any_get_tag"
 #define BN_ANY_AS_PTR          "__any_as_ptr"
 #define BN_ANY_AS_INT          "__any_as_int"
+#define BN_ANY_AS_DOUBLE       "__any_as_double"
+#define BN_ANY_AS_BOOL         "__any_as_bool"
 
 /* ── Print ──────────────────────────────────────────────────────────────────── */
 #define BN_PRINT               "print"
@@ -389,6 +421,8 @@ typedef enum {
   BUILTIN_STR_REPLACE_SUBRANGE,
   BUILTIN_STR_UTF8_COUNT,
   BUILTIN_STR_UTF16_COUNT,
+  BUILTIN_STR_ADDING_PERCENT_ENCODING,
+  BUILTIN_STR_REMOVING_PERCENT_ENCODING,
 
   /* ── Data ─────────────────────────────────────────────────────────────────── */
   BUILTIN_DATA_INIT,
@@ -401,6 +435,18 @@ typedef enum {
   BUILTIN_DATA_GET_BYTE,
   BUILTIN_DATA_BASE64_ENC,
   BUILTIN_DATA_BASE64_DEC,
+  BUILTIN_DATA_READ_FILE,
+  BUILTIN_DATA_WRITE_FILE,
+  BUILTIN_DATA_INIT_REPEATING,
+  BUILTIN_DATA_INIT_CAPACITY,
+  BUILTIN_DATA_RESERVE_CAPACITY,
+  BUILTIN_DATA_RESET_BYTES,
+  BUILTIN_DATA_EQUAL,
+  BUILTIN_FM_CURRENT_DIRECTORY,
+  BUILTIN_FM_FILE_EXISTS,
+  BUILTIN_FM_CREATE_DIRECTORY,
+  BUILTIN_FM_REMOVE_ITEM,
+  BUILTIN_FM_CONTENTS,
 
   /* ── Dictionary ───────────────────────────────────────────────────────────── */
   BUILTIN_DICT_INIT,
@@ -442,6 +488,8 @@ typedef enum {
   BUILTIN_ANY_BOX_PTR,
   BUILTIN_ANY_GET_TAG,
   BUILTIN_ANY_AS_INT,
+  BUILTIN_ANY_AS_DOUBLE,
+  BUILTIN_ANY_AS_BOOL,
   BUILTIN_ANY_AS_PTR,
 
   /* ── Print ────────────────────────────────────────────────────────────────── */
@@ -544,10 +592,13 @@ typedef enum {
   BUILTIN_JSON_VALUE,
   BUILTIN_JSON_ARRAY_COUNT,
   BUILTIN_JSON_ARRAY_ITEM,
+  BUILTIN_PLIST_DATA,
+  BUILTIN_PLIST_VALUE,
 
   /* Date formatting */
   BUILTIN_DATE_ISO8601,
   BUILTIN_DATE_FORMATTER_STRING,
+  BUILTIN_NF_FORMAT,
   BUILTIN_DATE_FROM_COMPONENTS,
 
   /* Calendar/Date runtime */
@@ -591,6 +642,8 @@ typedef enum {
   BUILTIN_ALARM_PS_MODE,
 
   BUILTIN_STR_CODEPOINT_COUNT,
+  BUILTIN_DECIMAL_PARSE,
+  BUILTIN_DOUBLE_HASH,
 
   BUILTIN__COUNT  /* sentinel */
 } BuiltinID;
@@ -708,6 +761,8 @@ static inline BuiltinID resolve_builtin_id(const char *raw_name) {
   if (strcmp(n, BN_STR_REPLACE_SUBRANGE) == 0) return BUILTIN_STR_REPLACE_SUBRANGE;
   if (strcmp(n, BN_STR_UTF8_COUNT)   == 0) return BUILTIN_STR_UTF8_COUNT;
   if (strcmp(n, BN_STR_UTF16_COUNT)  == 0) return BUILTIN_STR_UTF16_COUNT;
+  if (strcmp(n, BN_STR_ADDING_PERCENT_ENCODING) == 0) return BUILTIN_STR_ADDING_PERCENT_ENCODING;
+  if (strcmp(n, BN_STR_REMOVING_PERCENT_ENCODING) == 0) return BUILTIN_STR_REMOVING_PERCENT_ENCODING;
 
   /* ── Data ── */
   if (strcmp(n, BN_DATA_INIT)      == 0) return BUILTIN_DATA_INIT;
@@ -720,6 +775,18 @@ static inline BuiltinID resolve_builtin_id(const char *raw_name) {
   if (strcmp(n, BN_DATA_GET_BYTE)    == 0) return BUILTIN_DATA_GET_BYTE;
   if (strcmp(n, BN_DATA_BASE64_ENC)  == 0) return BUILTIN_DATA_BASE64_ENC;
   if (strcmp(n, BN_DATA_BASE64_DEC)  == 0) return BUILTIN_DATA_BASE64_DEC;
+  if (strcmp(n, BN_DATA_READ_FILE)   == 0) return BUILTIN_DATA_READ_FILE;
+  if (strcmp(n, BN_DATA_WRITE_FILE)  == 0) return BUILTIN_DATA_WRITE_FILE;
+  if (strcmp(n, BN_DATA_INIT_REPEATING) == 0) return BUILTIN_DATA_INIT_REPEATING;
+  if (strcmp(n, BN_DATA_INIT_CAPACITY)  == 0) return BUILTIN_DATA_INIT_CAPACITY;
+  if (strcmp(n, BN_DATA_RESERVE_CAPACITY) == 0) return BUILTIN_DATA_RESERVE_CAPACITY;
+  if (strcmp(n, BN_DATA_RESET_BYTES)    == 0) return BUILTIN_DATA_RESET_BYTES;
+  if (strcmp(n, BN_DATA_EQUAL)          == 0) return BUILTIN_DATA_EQUAL;
+  if (strcmp(n, BN_FM_CURRENT_DIRECTORY) == 0) return BUILTIN_FM_CURRENT_DIRECTORY;
+  if (strcmp(n, BN_FM_FILE_EXISTS)       == 0) return BUILTIN_FM_FILE_EXISTS;
+  if (strcmp(n, BN_FM_CREATE_DIRECTORY)  == 0) return BUILTIN_FM_CREATE_DIRECTORY;
+  if (strcmp(n, BN_FM_REMOVE_ITEM)       == 0) return BUILTIN_FM_REMOVE_ITEM;
+  if (strcmp(n, BN_FM_CONTENTS)          == 0) return BUILTIN_FM_CONTENTS;
 
   /* ── Dictionary ── */
   if (strcmp(n, BN_DICT_INIT)      == 0) return BUILTIN_DICT_INIT;
@@ -761,6 +828,8 @@ static inline BuiltinID resolve_builtin_id(const char *raw_name) {
   if (strcmp(n, BN_ANY_BOX_PTR)      == 0) return BUILTIN_ANY_BOX_PTR;
   if (strcmp(n, BN_ANY_GET_TAG)      == 0) return BUILTIN_ANY_GET_TAG;
   if (strcmp(n, BN_ANY_AS_INT)       == 0) return BUILTIN_ANY_AS_INT;
+  if (strcmp(n, BN_ANY_AS_DOUBLE)    == 0) return BUILTIN_ANY_AS_DOUBLE;
+  if (strcmp(n, BN_ANY_AS_BOOL)      == 0) return BUILTIN_ANY_AS_BOOL;
   if (strcmp(n, BN_ANY_AS_PTR)       == 0) return BUILTIN_ANY_AS_PTR;
 
   /* ── Print ── */
@@ -868,10 +937,13 @@ static inline BuiltinID resolve_builtin_id(const char *raw_name) {
   if (strcmp(n, "__json_value")       == 0) return BUILTIN_JSON_VALUE;
   if (strcmp(n, "__json_array_count") == 0) return BUILTIN_JSON_ARRAY_COUNT;
   if (strcmp(n, "__json_array_item")  == 0) return BUILTIN_JSON_ARRAY_ITEM;
+  if (strcmp(n, "__plist_data_from_value") == 0) return BUILTIN_PLIST_DATA;
+  if (strcmp(n, "__plist_value_from_data") == 0) return BUILTIN_PLIST_VALUE;
 
   /* ── Date ── */
   if (strcmp(n, "__date_iso8601")          == 0) return BUILTIN_DATE_ISO8601;
   if (strcmp(n, "__date_formatter_string") == 0) return BUILTIN_DATE_FORMATTER_STRING;
+  if (strcmp(n, "__nf_format")             == 0) return BUILTIN_NF_FORMAT;
   if (strcmp(n, "__date_from_components")  == 0) return BUILTIN_DATE_FROM_COMPONENTS;
 
   /* ── Calendar/Date runtime ── */
@@ -916,6 +988,9 @@ static inline BuiltinID resolve_builtin_id(const char *raw_name) {
   if (strcmp(n, BN_ALARM_PS_MODE)       == 0) return BUILTIN_ALARM_PS_MODE;
 
   if (strcmp(n, BN_STR_CODEPOINT_COUNT) == 0) return BUILTIN_STR_CODEPOINT_COUNT;
+
+  if (strcmp(n, "__decimal_parse") == 0) return BUILTIN_DECIMAL_PARSE;
+  if (strcmp(n, "__double_hash") == 0)   return BUILTIN_DOUBLE_HASH;
 
   return BUILTIN_NONE;
 }
