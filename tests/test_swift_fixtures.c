@@ -1,6 +1,6 @@
 /**
  * @file test_swift_fixtures.c
- * @brief Diagnostic-parity runner over tests/swift-fixtures/*.swift.
+ * @brief Diagnostic-parity runner over tests/swift-fixtures/ (*.swift files).
  *
  * Each fixture is a real .swift file annotated with apple/swift-style
  * markers in line comments:

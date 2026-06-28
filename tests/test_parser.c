@@ -22,13 +22,6 @@ static void cleanup(TokenStream *ts, ASTArena *arena, Parser *p) {
   token_stream_free(ts);
 }
 
-/* Count direct children of a node */
-static int child_count(const ASTNode *node) {
-  int n = 0;
-  for (const ASTNode *c = node->first_child; c; c = c->next_sibling) n++;
-  return n;
-}
-
 /* Find first child of given kind */
 static const ASTNode *find_child(const ASTNode *node, ASTNodeKind kind) {
   for (const ASTNode *c = node->first_child; c; c = c->next_sibling)
@@ -409,12 +402,14 @@ static void test_parse_switch_member_call_subject(void) {
 /* ── Error handling ───────────────────────────────────────────────────────── */
 
 static void test_parse_error_missing_brace(void) {
-  TEST("missing closing brace → error count > 0");
+  TEST("missing closing brace → parser recovers with a partial AST");
   Source src; TokenStream ts; ASTArena arena; Parser *p;
   ASTNode *root = parse_code("func f() {", &src, &ts, &arena, &p);
+  /* Best-effort recovery: EOF closes the unterminated block, so the parser
+   * still yields the function declaration instead of hanging or returning
+   * nothing. */
   ASSERT_NOT_NULL(root);
-  /* Parser should still produce a partial AST */
-  ASSERT(parser_error_count(p) >= 0); /* may or may not error depending on recovery */
+  ASSERT(root->first_child != NULL && root->first_child->kind == AST_FUNC_DECL);
   cleanup(&ts, &arena, p);
   TEST_PASS();
 }

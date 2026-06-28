@@ -5,9 +5,6 @@
  */
 #include "../../private.h"
 
-/*
- */
-
 static int node_is_within_decl(const ASTNode *node, const ASTNode *decl) {
   for (const ASTNode *p = node; p; p = p->parent)
     if (p == decl)
@@ -76,7 +73,7 @@ TypeInfo *resolve_node_expr(SemaContext *ctx, ASTNode *node) {
       if (!elem_t) {
         elem_t = et;
       } else if (et && !type_equal(elem_t, et)) {
-        /* Bug #6 (Piece C): heterogeneous element types fall back to [Any]
+        /* Heterogeneous element types fall back to [Any]
          * so contextual `let xs: [Any] = [1, "x"]` works. miniswift IR-gen
          * boxes each element via __any_box_* based on per-element type. */
         mixed = 1;

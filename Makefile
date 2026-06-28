@@ -8,7 +8,7 @@
 #   make wasm             # WebAssembly build (requires emcc)
 #   make asan             # AddressSanitizer test build (native)
 #   make dist             # copy headers + libs to dist/
-#   make codegen          # regenerate .h files from data/
+#   make codegen          # (maintainer-only) regenerate committed generated/*.h
 #   make clean
 #
 # Cross-compile:
@@ -309,6 +309,9 @@ $(PROJECT_BIN): debug $(TESTDIR)/msf_project.c $(TESTDIR)/stubs.c
 		-L$(NATIVE_DIR) -lMiniSwiftFrontend \
 		-o $@
 
+# MAINTAINER-ONLY: needs the Swift SDK + the scripts/ tooling, neither of which
+# ships in the public repo.  The result (generated/sdk_vocab.h) is committed, so
+# a normal build never runs this.
 # Regenerate the portable Swift vocabulary artifact (type names + member
 # signatures + import edges) by synthesizing every module's interface
 # (swift-synthesize-interface) for each SDK and parsing it with msf-vocab.
@@ -340,9 +343,11 @@ web-vocab:
 clean:
 	rm -rf $(BUILDDIR) $(DISTDIR)
 
-# ── Code Generation ──────────────────────────────────────────────────────────
-# Regenerate .h files from source-of-truth data files.
-# Run this after editing data/ast_nodes.def or scripts/types.yaml.
+# ── Code Generation (maintainer-only) ────────────────────────────────────────
+# Regenerates the committed generated/*.h headers from the source-of-truth data
+# files.  The generator scripts (scripts/) are NOT part of the public repo, so
+# this target only runs for maintainers who have that tooling checked out; a
+# normal build uses the committed headers and never needs it.
 
 codegen:
 	@echo "  GEN     ast_kinds.h + ast_names.h"

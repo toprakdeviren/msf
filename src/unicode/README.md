@@ -1,8 +1,7 @@
 # src/unicode — msf's Unicode layer
 
 msf's own, in-tree Unicode support. It started as the NFC-normalization slice of
-the `decoder` Unicode engine (MIT — see `LICENSE`, originally
-`/Users/2n/dev/personal/decoder`, commit `c5ecda4`) but is now **first-class msf
+the `decoder` Unicode engine (MIT — see `LICENSE`, commit `c5ecda4`) but is now **first-class msf
 source**, pruned to exactly what the frontend needs. We do not track upstream.
 
 ## What's here (and why)

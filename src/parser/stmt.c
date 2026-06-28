@@ -104,7 +104,7 @@ static int parse_case_condition(Parser *p, ASTNode *parent) {
     ASTNode *subj = parse_expr_no_trailing_closure(p);
     ASTNode *assign = alloc_node(p, AST_ASSIGN_EXPR);
     if (!assign) return -1;
-    assign->modifiers |= MOD_INDIRECT; /* marks as "if case" assign */
+    assign->modifiers |= MOD_INDIRECT; /* repurposed: flags this AST_ASSIGN_EXPR as an if-case binding (not an indirect enum) */
     ast_add_child(assign, pat);
     if (subj) ast_add_child(assign, subj);
     assign->tok_end = (uint32_t)p->pos;
@@ -258,7 +258,7 @@ ASTNode *parse_for(Parser *p) {
   if (p_is_kw(p, KW_CASE)) {
     adv(p);
     is_for_case = 1;
-    node->modifiers |= MOD_OVERRIDE; /* marks for-case */
+    node->modifiers |= MOD_OVERRIDE; /* repurposed: flags this AST_FOR_STMT as a for-case loop (not a Swift override) */
     if (p_is_kw(p, KW_LET)) adv(p);
   }
 
@@ -268,7 +268,7 @@ ASTNode *parse_for(Parser *p) {
     ASTNode *pat = is_for_case ? parse_pattern(p) : parse_expr_pratt(p, 0);
     if (pat) {
       if (is_for_case) {
-        pat->modifiers |= MOD_OVERRIDE;
+        pat->modifiers |= MOD_OVERRIDE; /* repurposed: matches the for-case flag on the parent node */
         ast_add_child(node, pat);
       } else {
         ASTNode *binding = alloc_node(p, AST_PARAM);

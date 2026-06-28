@@ -170,9 +170,9 @@ Token lexer_next(Lexer *lexer) {
   if (act == 3) return scan_string(lexer, s, len, sp, sl, sc);
 
   /* Raw string */
-  if (IS_RAW_STRING_START(c)) { 
+  if (IS_RAW_STRING_START(c)) {
     Token r = scan_raw_string(lexer, s, len, sp, sl, sc);
-    if (r.len > 0) return r; 
+    if (r.len > 0) return r;
   }
 
   /* Operator / comment / regex */

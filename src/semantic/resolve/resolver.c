@@ -1035,10 +1035,10 @@ static int check_conformance_impl(const ASTNode *type_decl,
         !strcmp(req_name, "associatedtype") || !strcmp(req_name, "typealias") ||
         !strcmp(req_name, "protocol"))
       continue;
-    /* Bug #16: subscript reqs parse but full conformance check requires
-     * locating an AST_SUBSCRIPT_DECL with a structurally-matching signature.
-     * That check is a follow-up; for now, find a subscript impl and accept
-     * its presence (no signature validation). */
+    /* Subscript requirements: a complete conformance check would locate an
+     * AST_SUBSCRIPT_DECL with a structurally-matching signature.  For now we
+     * accept the presence of any subscript implementation without validating
+     * its signature. */
     if (!strcmp(req_name, "subscript")) {
       int sub_found = 0;
       for (const ASTNode *impl = type_body->first_child; impl;

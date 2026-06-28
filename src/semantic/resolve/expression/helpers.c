@@ -5,12 +5,6 @@
  */
 #include "../../private.h"
 
-/*
- * resolution. Include after sema_resolve_access.h. Followed by
- * class_has_init_with_param_count, is_inherited_stored_property in
- * sema_resolve_decl.h.
- */
-
 TypeInfo *resolve_node(SemaContext *ctx, ASTNode *node);
 int class_has_init_with_param_count(SemaContext *ctx, const ASTNode *class_decl,
                                     uint32_t param_count);

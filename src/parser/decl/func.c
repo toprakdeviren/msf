@@ -264,7 +264,8 @@ ASTNode *parse_subscript_decl(Parser *p, uint32_t mods) {
  *   3. Parameter list — (label name: Type, ...)
  *   4. async modifier
  *   5. throws / rethrows / throws(ErrorType)
- *   6. Body — { ... }
+ *   6. where clause
+ *   7. Body — { ... }
  *
  * Unlike func, init has no name token (it's always "init") and no return
  * type (always Self).  The failable markers `?` and `!` are stored as

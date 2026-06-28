@@ -1041,8 +1041,11 @@ static const BuiltinTypeEntry BUILTIN_TYPE_TABLE[] = {
     BTE(SW_TYPE_FLOAT64, TY_BUILTIN_DOUBLE),
     BTE(SW_TYPE_FLOAT, TY_BUILTIN_FLOAT),
     BTE(SW_TYPE_FLOAT32, TY_BUILTIN_FLOAT),
+    /* Character and Substring are both lowered to String: Character has no
+       separate runtime representation in this type system, and Substring
+       shares String's member surface. */
     BTE(SW_TYPE_CHARACTER, TY_BUILTIN_STRING),
-    BTE("Substring", TY_BUILTIN_STRING),
+    BTE("Substring",       TY_BUILTIN_STRING),
     {NULL, NULL}
 };
 #undef BTE
@@ -1097,23 +1100,22 @@ void sema_destroy(SemaContext *ctx) {
     intern_pool_release(ctx->intern);
     free(ctx->intern);
   }
+  /* These tables are heap-allocated here, so we free their internals via the
+   * public table_free() (entries + index) and then the struct itself. */
   if (ctx->conformance_table) {
-    conformance_index_free(ctx->conformance_table);
-    free(ctx->conformance_table->entries);
+    conformance_table_free(ctx->conformance_table);
     free(ctx->conformance_table);
   }
   if (ctx->witness_members) {
-    conformance_index_free(ctx->witness_members);
-    free(ctx->witness_members->entries);
+    conformance_table_free(ctx->witness_members);
     free(ctx->witness_members);
   }
   if (ctx->witness_inherits) {
-    conformance_index_free(ctx->witness_inherits);
-    free(ctx->witness_inherits->entries);
+    conformance_table_free(ctx->witness_inherits);
     free(ctx->witness_inherits);
   }
   if (ctx->assoc_type_table) {
-    free(ctx->assoc_type_table->entries);
+    assoc_type_table_free(ctx->assoc_type_table);
     free(ctx->assoc_type_table);
   }
   free(ctx);

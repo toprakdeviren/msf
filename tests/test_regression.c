@@ -54,13 +54,7 @@ static const ASTNode *find_first(const ASTNode *n, ASTNodeKind k) {
   return NULL;
 }
 
-static int count_kind(const ASTNode *n, ASTNodeKind k) {
-  if (!n) return 0;
-  int c = (n->kind == k) ? 1 : 0;
-  for (const ASTNode *ch = n->first_child; ch; ch = ch->next_sibling)
-    c += count_kind(ch, k);
-  return c;
-}
+
 
 /* ═══════════════════════════════════════════════════════════════════════════
  *  1A. Union Clash — multi-trailing closure used data.binary.op_tok on

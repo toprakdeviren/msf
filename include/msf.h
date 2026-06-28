@@ -3,10 +3,6 @@
  * @brief MiniSwiftFrontend — Swift lexer, parser, and type analyzer.
  * @version 0.1.0
  *
- * "Bad code tries to do too much; its purpose is unclear.
- *  Clean code is focused. Every function, every module
- *  serves a single purpose — free from distraction."
- *
  * DESIGN PRINCIPLES
  *
  *   - One-shot API first (msf_analyze does everything)
@@ -21,6 +17,7 @@
  *   #include <msf.h>
  *
  *   MSFResult *r = msf_analyze("let x: Int = 42", "main.swift");
+ *   if (!r) { fprintf(stderr, "msf: out of memory\n"); return 1; }
  *
  *   // check errors
  *   for (uint32_t i = 0; i < msf_error_count(r); i++)
@@ -67,6 +64,15 @@
 #ifndef MSF_H
 #define MSF_H
 
+/*
+ * PORTABILITY
+ *   This header uses an anonymous union (struct TypeInfo) and therefore
+ *   requires C11, C17, or any compiler that accepts anonymous unions as an
+ *   extension (GCC, Clang, and MSVC all do in their default modes).  Strict
+ *   C99 with -pedantic-errors will reject it.  C++ compiles cleanly except
+ *   under -pedantic-errors, which flags the nested anonymous types.
+ */
+
 #define MSF_VERSION_MAJOR 0
 #define MSF_VERSION_MINOR 1
 #define MSF_VERSION_PATCH 0
@@ -76,6 +82,36 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+
+/*
+ * MSF_API — symbol visibility / import-export decoration on every public
+ * function.  Empty for static-library builds (the default).  For a shared
+ * build define MSF_BUILD_SHARED while compiling the library, and MSF_USE_SHARED
+ * while compiling a consumer, so the right __declspec / visibility attribute is
+ * emitted.  Data symbols (the TY_BUILTIN_* singletons) are decorated too.
+ */
+#ifndef MSF_API
+#  if defined(_WIN32)
+#    if defined(MSF_BUILD_SHARED)
+#      define MSF_API __declspec(dllexport)
+#    elif defined(MSF_USE_SHARED)
+#      define MSF_API __declspec(dllimport)
+#    else
+#      define MSF_API
+#    endif
+#  elif defined(__GNUC__) && (defined(MSF_BUILD_SHARED) || defined(MSF_USE_SHARED))
+#    define MSF_API __attribute__((visibility("default")))
+#  else
+#    define MSF_API
+#  endif
+#endif
+
+/*
+ * Sentinel values for "no such token / no such index".  Prefer these over a
+ * literal 0, because 0 is itself a valid token index / array index.
+ */
+#define MSF_NO_TOKEN UINT32_MAX
+#define MSF_NO_INDEX SIZE_MAX
 
 #ifdef __cplusplus
 extern "C" {
@@ -172,10 +208,16 @@ typedef enum {
 /** @brief A single token from the source code. */
 typedef struct {
   TokenType type;       /**< What kind of token.                         */
-  uint32_t  pos;        /**< Byte offset in source.                      */
+  uint32_t  pos;        /**< Byte offset in source (exact; the source
+                         *   length must fit in uint32_t).               */
   uint32_t  len;        /**< Byte length.                                */
   uint32_t  line;       /**< 1-based line number.                        */
-  uint32_t  col;        /**< 1-based column number.                      */
+  uint32_t  col;        /**< 1-based column, counted in Unicode scalar
+                         *   values (UTF-8 codepoints) from the line
+                         *   start — NOT bytes and NOT UTF-16 units.  For
+                         *   exact positions use `pos`; an LSP server that
+                         *   needs UTF-16 columns must recompute them from
+                         *   `pos` against the source text.              */
   Keyword   keyword;    /**< Which keyword (KW_NONE if not a keyword).   */
   OpKind    op_kind;    /**< Which operator (OP_NONE if single-char).    */
   uint8_t   has_leading_newline; /**< 1 if at least one newline was
@@ -202,7 +244,7 @@ typedef struct {
  * @param t  Token type.
  * @return   Static string: "keyword", "identifier", "int_lit", "eof", etc.
  */
-const char *token_type_name(TokenType t);
+MSF_API const char *token_type_name(TokenType t);
 
 /**
  * @brief Extracts the text of a token as a NUL-terminated string.
@@ -210,8 +252,35 @@ const char *token_type_name(TokenType t);
  * @param tok  Token to extract.
  * @return     NUL-terminated copy (thread-local buffer — overwritten on next call).
  *             Not reentrant; copy the result if you need to persist it.
+ *
+ * @warning The returned pointer is overwritten by the next call on the same
+ *          thread, so it is unsafe to hold two results at once
+ *          (`printf("%s %s", token_text(s,a), token_text(s,b))` is a bug).
+ *          Prefer the zero-copy msf_token_view() / msf_token_text() below, which
+ *          point straight into the source and have no shared buffer.
  */
-const char *token_text(const Source *src, const Token *tok);
+MSF_API const char *token_text(const Source *src, const Token *tok);
+
+/** @brief A (pointer, length) slice that borrows — never owns — its bytes.
+ *  Not NUL-terminated; use .len.  Valid as long as the backing Source is. */
+typedef struct {
+  const char *data;  /**< First byte (into the source buffer).      */
+  size_t      len;   /**< Byte length.                              */
+} MSFStringView;
+
+/**
+ * @brief Zero-copy view of a token's text — points into @p src, no allocation,
+ *        no shared buffer, reentrant.  Preferred over token_text().
+ * @return {src->data + tok->pos, tok->len}; {NULL,0} if either argument is NULL.
+ */
+MSF_API MSFStringView msf_token_view(const Source *src, const Token *tok);
+
+/** @brief First byte of the token's text within the source (NOT NUL-terminated;
+ *  read exactly msf_token_length() bytes).  NULL if either argument is NULL. */
+MSF_API const char *msf_token_text(const Source *src, const Token *tok);
+
+/** @brief Byte length of a token (0 if @p tok is NULL). */
+MSF_API size_t msf_token_length(const Token *tok);
 
 /* — Tokenize (only needed for advanced/step-by-step use) ------------------ */
 
@@ -220,13 +289,13 @@ const char *token_text(const Source *src, const Token *tok);
  * @param ts        Stream to initialize.
  * @param capacity  Expected number of tokens (hint).
  */
-void token_stream_init(TokenStream *ts, size_t capacity);
+MSF_API void token_stream_init(TokenStream *ts, size_t capacity);
 
 /**
  * @brief Frees all memory owned by a token stream.
  * @param ts  Stream to free.  The struct itself is not freed.
  */
-void token_stream_free(TokenStream *ts);
+MSF_API void token_stream_free(TokenStream *ts);
 
 /** @brief Opaque lexer diagnostics.  Pass NULL unless you need warnings. */
 typedef struct LexerDiagnostics LexerDiagnostics;
@@ -239,8 +308,41 @@ typedef struct LexerDiagnostics LexerDiagnostics;
  * @param diag     Diagnostic sink, or NULL.
  * @return         0 on success.
  */
-int lexer_tokenize(const Source *src, TokenStream *out, int skip_ws,
+MSF_API int lexer_tokenize(const Source *src, TokenStream *out, int skip_ws,
                    LexerDiagnostics *diag);
+
+/* — Lexer diagnostics lifecycle (only needed if you want lexer warnings) ---
+ *
+ * LexerDiagnostics is opaque.  Allocate one with lexer_diagnostics_new(), pass
+ * it to lexer_tokenize(), read the recorded entries with the accessors, then
+ * release it with lexer_diagnostics_free().  Most callers pass NULL and skip
+ * all of this.
+ *
+ *   LexerDiagnostics *d = lexer_diagnostics_new();
+ *   lexer_tokenize(&src, &ts, 1, d);
+ *   for (size_t i = 0; i < lexer_diagnostic_count(d); i++)
+ *       fprintf(stderr, "%u:%u: %s\n", lexer_diagnostic_line(d, i),
+ *               lexer_diagnostic_col(d, i), lexer_diagnostic_message(d, i));
+ *   lexer_diagnostics_free(d);
+ */
+
+/** @brief Allocates an empty diagnostics sink.  NULL on allocation failure. */
+MSF_API LexerDiagnostics *lexer_diagnostics_new(void);
+
+/** @brief Frees a diagnostics sink (may be NULL). */
+MSF_API void lexer_diagnostics_free(LexerDiagnostics *d);
+
+/** @brief Number of diagnostics recorded (0 if @p d is NULL). */
+MSF_API size_t lexer_diagnostic_count(const LexerDiagnostics *d);
+
+/** @brief Message of diagnostic @p i, or NULL if out of range.  Owned by @p d. */
+MSF_API const char *lexer_diagnostic_message(const LexerDiagnostics *d, size_t i);
+
+/** @brief 1-based line of diagnostic @p i (0 if out of range). */
+MSF_API uint32_t lexer_diagnostic_line(const LexerDiagnostics *d, size_t i);
+
+/** @brief 1-based column of diagnostic @p i (0 if out of range). */
+MSF_API uint32_t lexer_diagnostic_col(const LexerDiagnostics *d, size_t i);
 
 /* ┌──────────────────────────────────────────────────────────────────────────┐
  * │  3. TYPES — what sema resolves                                         │
@@ -273,7 +375,7 @@ int lexer_tokenize(const Source *src, TokenStream *out, int skip_ws,
 /** @brief Classification of a resolved type. */
 typedef enum {
   TY_UNKNOWN = 0,
-  /* @generated primitive TypeKind cases (scripts/codegen.py) */
+  /* @generated primitive TypeKind cases */
   TY_VOID,            /* Void          */
   TY_BOOL,            /* Bool          */
   TY_INT,             /* Int           */
@@ -354,9 +456,21 @@ struct TypeInfo {
   };
 };
 
-/* — Builtin singletons (compare by pointer: node->type == TY_BUILTIN_INT) - */
+/* — Builtin singletons (compare by pointer: node->type == TY_BUILTIN_INT) -
+ *
+ * These are immortal objects with static storage duration — stable across
+ * every analysis and every MSFResult lifetime, never freed.  (The "no hidden
+ * global state" design principle refers to *mutable* state: these singletons
+ * are immutable, so each MSFResult stays self-contained.)  Treat them as
+ * read-only; mutating one would corrupt every other analysis.
+ *
+ * Not every TypeKind has a singleton.  The fixed-width integers TY_INT8/16/32/64
+ * and TY_CHARACTER have no TY_BUILTIN_* (they surface as named types resolved
+ * through the conformance table / vocabulary); use type_kind_of() rather than a
+ * pointer compare when those kinds matter.
+ */
 
-extern TypeInfo
+extern MSF_API TypeInfo
   *TY_BUILTIN_VOID,   *TY_BUILTIN_BOOL,   *TY_BUILTIN_INT,
   *TY_BUILTIN_STRING, *TY_BUILTIN_DOUBLE,  *TY_BUILTIN_FLOAT,
   *TY_BUILTIN_DATA,   *TY_BUILTIN_SUBSTRING,
@@ -369,10 +483,11 @@ extern TypeInfo
 /**
  * @brief Canonicalizes a type into a switch-friendly TypeKind.
  *
- * This is the preferred way to inspect types.  Builtin types are
- * singletons (TY_BUILTIN_INT, TY_BUILTIN_STRING, ...) — comparing
- * their .kind field would always give TY_INT for all of them.
- * This function hides that detail so you can write clean switches.
+ * This is the preferred way to inspect a type's kind: it is NULL-safe (NULL
+ * maps to TY_VOID) and maps every builtin singleton to its canonical kind.
+ * Each builtin singleton already carries its own correct `.kind`, so this is
+ * equivalent to `ty ? ty->kind : TY_VOID`; prefer this helper anyway so callers
+ * have one obvious entry point and stay insulated from how builtins are stored.
  *
  * @param ty  Type to inspect (NULL is treated as TY_VOID).
  * @return    The canonical TypeKind.
@@ -392,6 +507,8 @@ static inline TypeKind type_kind_of(const TypeInfo *ty) {
   if (ty == TY_BUILTIN_UINT32)    return TY_UINT32;
   if (ty == TY_BUILTIN_UINT16)    return TY_UINT16;
   if (ty == TY_BUILTIN_UINT8)     return TY_UINT8;
+  if (ty == TY_BUILTIN_JSONENCODER) return TY_JSONENCODER;
+  if (ty == TY_BUILTIN_JSONDECODER) return TY_JSONDECODER;
   return ty->kind;
 }
 
@@ -407,19 +524,19 @@ static inline TypeKind type_kind_of(const TypeInfo *ty) {
  * type_to_string(node->type, buf, sizeof(buf));  // "Int", "[String]", "Int?", ...
  * @endcode
  */
-const char *type_to_string(const TypeInfo *t, char *buf, size_t size);
+MSF_API const char *type_to_string(const TypeInfo *t, char *buf, size_t size);
 
 /**
  * @brief Shallow type equality (kind + name, ignores generic args).
  * @return Non-zero if equal.
  */
-int type_equal(const TypeInfo *a, const TypeInfo *b);
+MSF_API int type_equal(const TypeInfo *a, const TypeInfo *b);
 
 /**
  * @brief Deep type equality (including generic arguments recursively).
  * @return Non-zero if structurally equal.
  */
-int type_equal_deep(const TypeInfo *a, const TypeInfo *b);
+MSF_API int type_equal_deep(const TypeInfo *a, const TypeInfo *b);
 
 /* ┌──────────────────────────────────────────────────────────────────────────┐
  * │  4. AST — the syntax tree                                              │
@@ -437,7 +554,7 @@ int type_equal_deep(const TypeInfo *a, const TypeInfo *b);
 
 /** @brief What kind of syntax this node represents. @generated */
 typedef enum {
-  /* @generated AST node kinds (data/ast_nodes.def via scripts/gen_ast_names.py) */
+  /* @generated AST node kinds (from data/ast_nodes.def) */
 
   /* ── Top-level ─────────────────────────────────────────────── */
   AST_UNKNOWN = 0,
@@ -575,8 +692,11 @@ struct ASTNode {
 
   /* semantic info (populated after msf_analyze) */
   TypeInfo *type;                   /**< Resolved type (NULL before analysis). */
-  uint32_t  modifiers;              /**< Declaration modifiers bitmask.       */
-  uint32_t  arg_label_tok;          /**< Argument label token (0 if none).    */
+  uint64_t  modifiers;              /**< Declaration modifiers bitmask (MOD_*). */
+  uint32_t  arg_label_tok;          /**< Argument-label token index; 0 if none
+                                     *   (token 0 is the file's first token and
+                                     *   can never be an argument label, so 0 is
+                                     *   an unambiguous sentinel here).          */
 
   /** @brief Kind-specific payload — check `kind` before reading. */
   union {
@@ -609,7 +729,7 @@ struct ASTNode {
  * @param k  Node kind.
  * @return   Static string: "func_decl", "if_stmt", "call_expr", etc.
  */
-const char *ast_kind_name(ASTNodeKind k);
+MSF_API const char *ast_kind_name(ASTNodeKind k);
 
 /** @brief Iterates over the children of an AST node.
  *  @code
@@ -647,7 +767,7 @@ typedef struct MSFVocab MSFVocab;
  * @brief Returns the library version string.
  * @return  Static string, e.g. "0.1.0".
  */
-const char *msf_version(void);
+MSF_API const char *msf_version(void);
 
 /**
  * @brief Analyzes Swift source code: tokenize, parse, and resolve all types.
@@ -663,7 +783,25 @@ const char *msf_version(void);
  * @return          Analysis result (opaque).  NULL on allocation failure.
  *                  Free with msf_result_free().
  */
-MSFResult *msf_analyze(const char *code, const char *filename);
+MSF_API MSFResult *msf_analyze(const char *code, const char *filename);
+
+/**
+ * @brief Like msf_analyze(), but takes an explicit byte length instead of
+ *        relying on NUL termination.
+ *
+ * For embedders that hold source in a length-counted buffer (IDE/LSP text
+ * stores, mmap'd files, WASM linear memory, embedded slices) — @p code need
+ * not be NUL-terminated and may contain embedded NULs.  The result owns its own
+ * copy.  @p len must fit in uint32_t (source offsets are 32-bit); longer input
+ * is rejected with NULL.
+ *
+ * @param code      Source bytes (need not be NUL-terminated).
+ * @param len       Byte length of @p code.
+ * @param filename  File name for diagnostics, or NULL for "\<input\>".
+ * @return          Analysis result (opaque).  NULL on allocation failure or if
+ *                  @p code is NULL / @p len exceeds UINT32_MAX.
+ */
+MSF_API MSFResult *msf_analyze_bytes(const char *code, size_t len, const char *filename);
 
 /**
  * @brief Like msf_analyze(), but with module-level type names predeclared.
@@ -680,7 +818,7 @@ MSFResult *msf_analyze(const char *code, const char *filename);
  * @param module_type_count  Number of entries in @p module_types.
  * @return                   Analysis result (opaque). NULL on allocation failure.
  */
-MSFResult *msf_analyze_in_module(const char *code, const char *filename,
+MSF_API MSFResult *msf_analyze_in_module(const char *code, const char *filename,
                                  const char *const *module_types, size_t module_type_count);
 
 /**
@@ -696,14 +834,26 @@ MSFResult *msf_analyze_in_module(const char *code, const char *filename,
  * @param vocab     Loaded vocabulary (msf_vocab_parse / msf_vocab_new), or NULL.
  * @return          Result (free with msf_result_free), or NULL on allocation failure.
  */
-MSFResult *msf_analyze_with_vocab(const char *code, const char *filename,
+MSF_API MSFResult *msf_analyze_with_vocab(const char *code, const char *filename,
                                   const struct MSFVocab *vocab);
 
 /**
  * @brief Frees all resources held by an analysis result.
  * @param r  Result to free (may be NULL).
  */
-void msf_result_free(MSFResult *r);
+MSF_API void msf_result_free(MSFResult *r);
+
+/**
+ * @brief Frees a heap buffer returned by an msf_* function (may be NULL).
+ *
+ * Use this — not the C library's free() — for every char* / void* that the API
+ * hands back for the caller to own (msf_vocab_serialize(), msf_dump_*_string()).
+ * It routes the deallocation through the library's own allocator, which matters
+ * when the library and the caller link different C runtimes (Windows DLLs,
+ * custom allocators).  Does NOT free opaque handles — those keep their own
+ * *_free().
+ */
+MSF_API void msf_free(void *p);
 
 /* ┌──────────────────────────────────────────────────────────────────────────┐
  * │  5b. WHOLE-MODULE — analyze several files as one unit                   │
@@ -728,7 +878,7 @@ void msf_result_free(MSFResult *r);
 typedef struct MSFModule MSFModule;
 
 /** @brief Allocates an empty module.  NULL on allocation failure. */
-MSFModule *msf_module_new(void);
+MSF_API MSFModule *msf_module_new(void);
 
 /**
  * @brief Lexes + parses one source file and adds it to the module.
@@ -738,7 +888,20 @@ MSFModule *msf_module_new(void);
  *
  * @return 0 on success, non-zero on tokenize/allocation failure (file skipped).
  */
-int msf_module_add_file(MSFModule *m, const char *code, const char *filename);
+MSF_API int msf_module_add_file(MSFModule *m, const char *code, const char *filename);
+
+/**
+ * @brief Like msf_module_add_file(), but takes an explicit byte length instead
+ *        of relying on NUL termination (see msf_analyze_bytes()).
+ *
+ * @p code need not be NUL-terminated and may contain embedded NULs; @p len must
+ * fit in uint32_t.  Copies @p code (caller may free immediately).
+ *
+ * @return 0 on success, non-zero on tokenize/allocation failure or if @p len
+ *         exceeds UINT32_MAX (file skipped).
+ */
+MSF_API int msf_module_add_file_bytes(MSFModule *m, const char *code, size_t len,
+                              const char *filename);
 
 /**
  * @brief Attaches a runtime module vocabulary (see §5c) to resolve `import`s.
@@ -748,7 +911,7 @@ int msf_module_add_file(MSFModule *m, const char *code, const char *filename);
  *
  * @return 0 on success, non-zero if the module was already analyzed.
  */
-int msf_module_set_vocabulary(MSFModule *m, const struct MSFVocab *vocab);
+MSF_API int msf_module_set_vocabulary(MSFModule *m, const struct MSFVocab *vocab);
 
 /**
  * @brief Attaches an SDK vocabulary used as a global last-resort fallback.
@@ -759,36 +922,36 @@ int msf_module_set_vocabulary(MSFModule *m, const struct MSFVocab *vocab);
  * from the per-import vocabulary so project modules' types stay import-scoped.
  * Borrowed.  Call before msf_module_analyze().
  */
-int msf_module_set_sdk_vocabulary(MSFModule *m, const struct MSFVocab *vocab);
+MSF_API int msf_module_set_sdk_vocabulary(MSFModule *m, const struct MSFVocab *vocab);
 
 /**
  * @brief Runs whole-module semantic analysis over all added files.
  * @return 0 if no diagnostics, 1 if any, negative on error. Call once.
  */
-int msf_module_analyze(MSFModule *m);
+MSF_API int msf_module_analyze(MSFModule *m);
 
 /** @brief Total semantic diagnostics across the module (after analyze). */
-uint32_t msf_module_error_count(const MSFModule *m);
+MSF_API uint32_t msf_module_error_count(const MSFModule *m);
 
 /** @brief Diagnostic message at @p index, or "" if out of range. */
-const char *msf_module_error_message(const MSFModule *m, uint32_t index);
+MSF_API const char *msf_module_error_message(const MSFModule *m, uint32_t index);
 
 /** @brief File path the diagnostic at @p index belongs to (whole-module: the
  *  offending node's origin file), or NULL.  The pointer is owned by the module;
  *  valid until msf_module_free(). */
-const char *msf_module_error_file(const MSFModule *m, uint32_t index);
+MSF_API const char *msf_module_error_file(const MSFModule *m, uint32_t index);
 
 /** @brief 1-based line of the diagnostic at @p index (0 if unknown). */
-uint32_t msf_module_error_line(const MSFModule *m, uint32_t index);
+MSF_API uint32_t msf_module_error_line(const MSFModule *m, uint32_t index);
 
 /** @brief 1-based column of the diagnostic at @p index (0 if unknown). */
-uint32_t msf_module_error_col(const MSFModule *m, uint32_t index);
+MSF_API uint32_t msf_module_error_col(const MSFModule *m, uint32_t index);
 
 /** @brief Byte length of the offending range at @p index (0 if unknown). */
-uint32_t msf_module_error_length(const MSFModule *m, uint32_t index);
+MSF_API uint32_t msf_module_error_length(const MSFModule *m, uint32_t index);
 
 /** @brief Number of files successfully added to the module. */
-size_t msf_module_file_count(const MSFModule *m);
+MSF_API size_t msf_module_file_count(const MSFModule *m);
 
 /* — Per-file results -------------------------------------------------------- *
  *
@@ -800,40 +963,41 @@ size_t msf_module_file_count(const MSFModule *m);
  * msf_module_free(); @p i must be < msf_module_file_count(). */
 
 /** @brief File name of file @p i (as passed to msf_module_add_file), or NULL. */
-const char *msf_module_file_name(const MSFModule *m, size_t i);
+MSF_API const char *msf_module_file_name(const MSFModule *m, size_t i);
 
 /** @brief Root AST node of file @p i, or NULL if out of range. */
-const ASTNode *msf_module_file_root(const MSFModule *m, size_t i);
+MSF_API const ASTNode *msf_module_file_root(const MSFModule *m, size_t i);
 
 /** @brief Source buffer of file @p i, or NULL if out of range. */
-const Source *msf_module_file_source(const MSFModule *m, size_t i);
+MSF_API const Source *msf_module_file_source(const MSFModule *m, size_t i);
 
 /** @brief Token array of file @p i (TOK_EOF-terminated), or NULL. */
-const Token *msf_module_file_tokens(const MSFModule *m, size_t i);
+MSF_API const Token *msf_module_file_tokens(const MSFModule *m, size_t i);
 
 /** @brief Token count of file @p i (0 if out of range). */
-size_t msf_module_file_token_count(const MSFModule *m, size_t i);
+MSF_API size_t msf_module_file_token_count(const MSFModule *m, size_t i);
 
 /**
  * @brief Index of the file carrying top-level executable code — the module's
  *        entry (Swift permits this only in main.swift / an @main file), or
  *        SIZE_MAX if the module has none.  Call after msf_module_analyze().
  */
-size_t msf_module_entry_file_index(const MSFModule *m);
+MSF_API size_t msf_module_entry_file_index(const MSFModule *m);
 
 /**
  * @brief Like msf_parse_expression(), but parses into the module's shared arena.
  *
  * For re-parsing a bare expression (e.g. a string-interpolation segment) while
  * lowering one of the module's files.  The returned node and its tokens live in
- * @p m and need no cleanup; @p out_tokens receives the token array for
- * token_text() (or NULL if unavailable).  Call after msf_module_analyze().
+ * @p m and need no cleanup; @p out_tokens receives the TOK_EOF-terminated token
+ * array for token_text() (or NULL if unavailable).  Call after
+ * msf_module_analyze().
  */
-const ASTNode *msf_module_parse_expression(MSFModule *m, const char *expr_text,
+MSF_API const ASTNode *msf_module_parse_expression(MSFModule *m, const char *expr_text,
                                            const Token **out_tokens);
 
 /** @brief Frees the module and everything it owns (may be NULL). */
-void msf_module_free(MSFModule *m);
+MSF_API void msf_module_free(MSFModule *m);
 
 /* ┌──────────────────────────────────────────────────────────────────────────┐
  * │  5c. MODULE VOCABULARY — portable type index from .swiftinterface       │
@@ -883,18 +1047,18 @@ typedef enum {
 /* MSFVocab is forward-declared in §5 (opaque; free with msf_vocab_free()). */
 
 /** @brief Allocates an empty vocabulary.  NULL on allocation failure. */
-MSFVocab *msf_vocab_new(void);
+MSF_API MSFVocab *msf_vocab_new(void);
 
 /**
  * @brief Returns the SDK vocabulary compiled into the library.
  *
- * This is generated/sdk_vocab.h (produced by `make sdk-vocab`) parsed into a
+ * This is generated/sdk_vocab.h (produced by maintainer-only tooling) parsed into a
  * fresh MSFVocab — the public types of the installed Swift SDK modules, baked
  * in so `import SwiftUI`/`Foundation`/… resolve with no SDK present (browser,
  * Windows).  Empty if the project was built without a generated vocabulary.
  * Caller frees with msf_vocab_free().
  */
-MSFVocab *msf_vocab_builtin(void);
+MSF_API MSFVocab *msf_vocab_builtin(void);
 
 /**
  * @brief Materialize types that are only REFERENCED (in a conformance /
@@ -908,7 +1072,7 @@ MSFVocab *msf_vocab_builtin(void);
  *
  * @return Number of types materialized.
  */
-size_t    msf_vocab_materialize_referenced_types(MSFVocab *v);
+MSF_API size_t    msf_vocab_materialize_referenced_types(MSFVocab *v);
 
 /**
  * @brief Parses one module's `.swiftinterface` source and merges its public
@@ -921,7 +1085,7 @@ size_t    msf_vocab_materialize_referenced_types(MSFVocab *v);
  *
  * @return Number of new type names added (0 on parse/allocation failure).
  */
-size_t msf_vocab_add_interface(MSFVocab *v, const char *module_name,
+MSF_API size_t msf_vocab_add_interface(MSFVocab *v, const char *module_name,
                                const char *interface_src);
 
 /**
@@ -933,25 +1097,25 @@ size_t msf_vocab_add_interface(MSFVocab *v, const char *module_name,
  * to add a dependency's internals for one importer's analysis and then restore,
  * so internals do not leak to plain importers.
  */
-size_t msf_vocab_add_interface_testable(MSFVocab *v, const char *module_name,
+MSF_API size_t msf_vocab_add_interface_testable(MSFVocab *v, const char *module_name,
                                         const char *interface_src);
 
 /** @brief Number of types currently recorded for a module (by name), 0 if absent. */
-size_t msf_vocab_module_type_count(const MSFVocab *v, const char *module_name);
+MSF_API size_t msf_vocab_module_type_count(const MSFVocab *v, const char *module_name);
 
 /** @brief Drops a module's types down to @p count (freeing the removed entries);
  *  no-op if the module is absent or already at/below count. */
-void msf_vocab_module_truncate(MSFVocab *v, const char *module_name,
+MSF_API void msf_vocab_module_truncate(MSFVocab *v, const char *module_name,
                                size_t count);
 
 /**
  * @brief Serializes the vocabulary to the portable `.msfvocab` text format.
- * @return Heap-allocated NUL-terminated text (caller frees with free()), or NULL.
+ * @return Heap-allocated NUL-terminated text (caller frees with msf_free()), or NULL.
  */
-char *msf_vocab_serialize(const MSFVocab *v);
+MSF_API char *msf_vocab_serialize(const MSFVocab *v);
 
 /** @brief Parses `.msfvocab` text into a vocabulary.  NULL on error. */
-MSFVocab *msf_vocab_parse(const char *text);
+MSF_API MSFVocab *msf_vocab_parse(const char *text);
 
 /**
  * @brief Adds a single (name, kind) type to @p module (building it if needed),
@@ -959,32 +1123,32 @@ MSFVocab *msf_vocab_parse(const char *text);
  *        type names harvested from Objective-C framework headers.
  * @return 1 if newly added, 0 if duplicate / on failure.
  */
-int msf_vocab_add_type(MSFVocab *v, const char *module, const char *name,
+MSF_API int msf_vocab_add_type(MSFVocab *v, const char *module, const char *name,
                        MSFVocabKind kind);
 
 /** @brief Number of modules in the vocabulary. */
-size_t msf_vocab_module_count(const MSFVocab *v);
+MSF_API size_t msf_vocab_module_count(const MSFVocab *v);
 
 /** @brief Name of module @p index, or NULL if out of range. */
-const char *msf_vocab_module_name(const MSFVocab *v, size_t index);
+MSF_API const char *msf_vocab_module_name(const MSFVocab *v, size_t index);
 
 /** @brief Number of types in module @p index. */
-size_t msf_vocab_type_count(const MSFVocab *v, size_t index);
+MSF_API size_t msf_vocab_type_count(const MSFVocab *v, size_t index);
 
 /** @brief Name of type @p t in module @p m, or NULL if out of range. */
-const char *msf_vocab_type_name(const MSFVocab *v, size_t m, size_t t);
+MSF_API const char *msf_vocab_type_name(const MSFVocab *v, size_t m, size_t t);
 
 /** @brief Kind of type @p t in module @p m (meaningful only when name != NULL). */
-MSFVocabKind msf_vocab_type_kind(const MSFVocab *v, size_t m, size_t t);
+MSF_API MSFVocabKind msf_vocab_type_kind(const MSFVocab *v, size_t m, size_t t);
 
 /** @brief Space-joined direct protocol conformances of type @p t in module @p m
  *  (`.msfvocab` v3), or NULL if none recorded. */
-const char *msf_vocab_type_conformances(const MSFVocab *v, size_t m, size_t t);
+MSF_API const char *msf_vocab_type_conformances(const MSFVocab *v, size_t m, size_t t);
 
 /* — Members (`.msfvocab` v2): per-type method/property/init/… signatures ---- */
 
 /** @brief Number of recorded members of type @p t in module @p m. */
-size_t msf_vocab_member_count(const MSFVocab *v, size_t m, size_t t);
+MSF_API size_t msf_vocab_member_count(const MSFVocab *v, size_t m, size_t t);
 
 /**
  * @brief Signature text of member @p i of type @p t in module @p m, or NULL.
@@ -993,11 +1157,11 @@ size_t msf_vocab_member_count(const MSFVocab *v, size_t m, size_t t);
  * surrounding whitespace removed, e.g. "addSubview(_ view: UIView)" or
  * "layer: CALayer".  Owned by @p v; valid until msf_vocab_free().
  */
-const char *msf_vocab_member_signature(const MSFVocab *v, size_t m, size_t t,
+MSF_API const char *msf_vocab_member_signature(const MSFVocab *v, size_t m, size_t t,
                                        size_t i);
 
 /** @brief Kind of member @p i of type @p t in module @p m. */
-MSFVocabMemberKind msf_vocab_member_kind(const MSFVocab *v, size_t m, size_t t,
+MSF_API MSFVocabMemberKind msf_vocab_member_kind(const MSFVocab *v, size_t m, size_t t,
                                          size_t i);
 
 /**
@@ -1012,17 +1176,17 @@ MSFVocabMemberKind msf_vocab_member_kind(const MSFVocab *v, size_t m, size_t t,
  * property (a plain access `obj.m`); the other is used if the preferred kind is
  * absent.
  */
-const char *msf_vocab_find_member(const MSFVocab *v, const char *type_name,
+MSF_API const char *msf_vocab_find_member(const MSFVocab *v, const char *type_name,
                                   const char *member_name, int prefer_callable,
                                   MSFVocabMemberKind *out_kind);
 
 /* — Dependency graph (`.msfvocab` v2): which modules each module imports ---- */
 
 /** @brief Number of modules that module @p m imports (its dependency edges). */
-size_t msf_vocab_module_dep_count(const MSFVocab *v, size_t m);
+MSF_API size_t msf_vocab_module_dep_count(const MSFVocab *v, size_t m);
 
 /** @brief Name of dependency @p d of module @p m, or NULL.  Borrowed by @p v. */
-const char *msf_vocab_module_dep(const MSFVocab *v, size_t m, size_t d);
+MSF_API const char *msf_vocab_module_dep(const MSFVocab *v, size_t m, size_t d);
 
 /**
  * @brief Computes the transitive import closure of @p seeds over the dependency
@@ -1035,7 +1199,7 @@ const char *msf_vocab_module_dep(const MSFVocab *v, size_t m, size_t d);
  * first, then call again with a buffer.  Seeds and edges naming a module not
  * present in @p v are skipped.
  */
-size_t msf_vocab_import_closure(const MSFVocab *v, const char *const *seeds,
+MSF_API size_t msf_vocab_import_closure(const MSFVocab *v, const char *const *seeds,
                                 size_t seed_count, const char **out,
                                 size_t out_cap);
 
@@ -1048,7 +1212,7 @@ size_t msf_vocab_import_closure(const MSFVocab *v, const char *const *seeds,
  *
  * @return NULL (and *out_count = 0) if the module is not present.
  */
-const char *const *msf_vocab_module_types(const MSFVocab *v,
+MSF_API const char *const *msf_vocab_module_types(const MSFVocab *v,
                                           const char *module_name,
                                           size_t *out_count);
 
@@ -1061,10 +1225,10 @@ const char *const *msf_vocab_module_types(const MSFVocab *v,
  * not model.  Treating the vocabulary as one global name pool resolves such
  * names without enumerating every re-export edge.
  */
-int msf_vocab_has_type(const MSFVocab *v, const char *name);
+MSF_API int msf_vocab_has_type(const MSFVocab *v, const char *name);
 
 /** @brief Frees the vocabulary and everything it owns (may be NULL). */
-void msf_vocab_free(MSFVocab *v);
+MSF_API void msf_vocab_free(MSFVocab *v);
 
 /* ┌──────────────────────────────────────────────────────────────────────────┐
  * │  5d. PROJECT — discover the module graph of an Xcode / SwiftPM project   │
@@ -1099,39 +1263,39 @@ typedef struct MSFProject MSFProject;
  * @return Project handle (possibly with zero modules), or NULL on alloc failure
  *         / unsupported build.  Free with msf_project_free().
  */
-MSFProject *msf_project_open(const char *root_dir);
+MSF_API MSFProject *msf_project_open(const char *root_dir);
 
 /** @brief Number of discovered modules. */
-size_t      msf_project_module_count(const MSFProject *p);
+MSF_API size_t      msf_project_module_count(const MSFProject *p);
 
 /** @brief Module @p i's name (target name), or NULL if out of range. */
-const char *msf_project_module_name(const MSFProject *p, size_t i);
+MSF_API const char *msf_project_module_name(const MSFProject *p, size_t i);
 
 /** @brief Module @p i's kind: "xcode-target", "spm-target", or "spm-test". */
-const char *msf_project_module_kind(const MSFProject *p, size_t i);
+MSF_API const char *msf_project_module_kind(const MSFProject *p, size_t i);
 
 /** @brief Module @p i's source root directory (absolute), or NULL. */
-const char *msf_project_module_dir(const MSFProject *p, size_t i);
+MSF_API const char *msf_project_module_dir(const MSFProject *p, size_t i);
 
 /** @brief Number of discovered .swift files in module @p i. */
-size_t      msf_project_module_file_count(const MSFProject *p, size_t i);
+MSF_API size_t      msf_project_module_file_count(const MSFProject *p, size_t i);
 
 /** @brief Path of source file @p j in module @p i, or NULL if out of range. */
-const char *msf_project_module_file(const MSFProject *p, size_t i, size_t j);
+MSF_API const char *msf_project_module_file(const MSFProject *p, size_t i, size_t j);
 
 /** @brief Number of in-project modules that module @p i depends on (derived
  *         from its `import` statements that name another discovered module). */
-size_t      msf_project_module_dep_count(const MSFProject *p, size_t i);
+MSF_API size_t      msf_project_module_dep_count(const MSFProject *p, size_t i);
 
 /** @brief Index of dependency @p k of module @p i, or (size_t)-1 if out of range. */
-size_t      msf_project_module_dep(const MSFProject *p, size_t i, size_t k);
+MSF_API size_t      msf_project_module_dep(const MSFProject *p, size_t i, size_t k);
 
 /**
  * @brief Index of the project's executable target — the build entry — or
  *        SIZE_MAX if the project has no executable (pure library / unresolved).
  *        Distinguished from libraries by `.executableTarget` in Package.swift.
  */
-size_t      msf_project_entry_module(const MSFProject *p);
+MSF_API size_t      msf_project_entry_module(const MSFProject *p);
 
 /**
  * @brief Writes module indices in dependency order (each module after the
@@ -1140,7 +1304,7 @@ size_t      msf_project_entry_module(const MSFProject *p);
  *        module's `import <sibling>` resolves the sibling's already-built types.
  *        Cycles are tolerated (a node already on the DFS stack is not re-entered).
  */
-size_t      msf_project_compile_order(const MSFProject *p, size_t *out, size_t cap);
+MSF_API size_t      msf_project_compile_order(const MSFProject *p, size_t *out, size_t cap);
 
 /**
  * @brief Harvests public type NAMES from the project's bundled binary
@@ -1154,7 +1318,7 @@ size_t      msf_project_compile_order(const MSFProject *p, size_t *out, size_t c
  *
  * @return Number of frameworks harvested.
  */
-size_t      msf_project_harvest_frameworks(const MSFProject *p, MSFVocab *v);
+MSF_API size_t      msf_project_harvest_frameworks(const MSFProject *p, MSFVocab *v);
 
 /**
  * @brief Harvest the public type surface of vendored dependency managers
@@ -1169,7 +1333,7 @@ size_t      msf_project_harvest_frameworks(const MSFProject *p, MSFVocab *v);
  *
  * @return Number of pods + Carthage frameworks/checkouts harvested.
  */
-size_t      msf_project_harvest_packages(const MSFProject *p, MSFVocab *v);
+MSF_API size_t      msf_project_harvest_packages(const MSFProject *p, MSFVocab *v);
 
 /**
  * @brief Harvest the project's OWN Objective-C header type surface into the vocab.
@@ -1183,15 +1347,15 @@ size_t      msf_project_harvest_packages(const MSFProject *p, MSFVocab *v);
  *
  * @return Number of modules scanned.
  */
-size_t      msf_project_harvest_own_headers(const MSFProject *p, MSFVocab *v);
+MSF_API size_t      msf_project_harvest_own_headers(const MSFProject *p, MSFVocab *v);
 
 /** @brief Number of distinct modules imported across the project that are NOT
  *         project modules — i.e. external/SDK frameworks (SwiftUI, Foundation,
  *         …).  These are the modules a vocabulary (§5c) would supply. */
-size_t      msf_project_external_import_count(const MSFProject *p);
+MSF_API size_t      msf_project_external_import_count(const MSFProject *p);
 
 /** @brief Name of external import @p k, or NULL if out of range. */
-const char *msf_project_external_import(const MSFProject *p, size_t k);
+MSF_API const char *msf_project_external_import(const MSFProject *p, size_t k);
 
 /**
  * @brief Builds and runs whole-module analysis for module @p i (reads its files
@@ -1199,21 +1363,22 @@ const char *msf_project_external_import(const MSFProject *p, size_t k);
  * @return Analyzed module — inspect via msf_module_error_*; free with
  *         msf_module_free().  NULL on error / unsupported build.
  */
-MSFModule  *msf_project_analyze_module(const MSFProject *p, size_t i);
+MSF_API MSFModule  *msf_project_analyze_module(const MSFProject *p, size_t i);
 
 /**
  * @brief Like msf_project_analyze_module(), but resolves cross-module references
  *        through @p shared_vocab and then publishes module @p i's own public
  *        types into it.
  *
- * Analyze modules in dependency order (see msf_project_module_dep): a module's
+ * Analyze modules in dependency order (use msf_project_compile_order() to get
+ * that order; msf_project_module_dep() exposes the raw edges): a module's
  * `import X` resolves X's types from @p shared_vocab once X has been analyzed.
  * Pass the SAME vocabulary (msf_vocab_new()) across the whole sweep; free it
  * after.  This collapses the cross-module "undeclared type" surface.
  *
  * @return Analyzed module (free with msf_module_free()), or NULL.
  */
-MSFModule  *msf_project_analyze_module_resolved(const MSFProject *p, size_t i,
+MSF_API MSFModule  *msf_project_analyze_module_resolved(const MSFProject *p, size_t i,
                                                 MSFVocab *shared_vocab);
 
 /**
@@ -1224,10 +1389,10 @@ MSFModule  *msf_project_analyze_module_resolved(const MSFProject *p, size_t i,
  * per-import shared vocabulary keeps project modules' types import-scoped.
  * Borrowed — keep it alive across analysis.
  */
-void        msf_project_set_sdk_vocabulary(MSFProject *p, const struct MSFVocab *v);
+MSF_API void        msf_project_set_sdk_vocabulary(MSFProject *p, const struct MSFVocab *v);
 
 /** @brief Frees the project and everything it owns (may be NULL). */
-void        msf_project_free(MSFProject *p);
+MSF_API void        msf_project_free(MSFProject *p);
 
 /* ┌──────────────────────────────────────────────────────────────────────────┐
  * │  6. READ — inspect the result                                          │
@@ -1238,28 +1403,28 @@ void        msf_project_free(MSFProject *p);
  * @param r  Analysis result.
  * @return   Root node (always AST_SOURCE_FILE on success), or NULL if r is NULL.
  */
-const ASTNode *msf_root(const MSFResult *r);
+MSF_API const ASTNode *msf_root(const MSFResult *r);
 
 /**
  * @brief Returns the source descriptor (for dump functions and token_text).
  * @param r  Analysis result.
  * @return   Pointer to the Source.  Owned by r; valid until msf_result_free().
  */
-const Source *msf_source(const MSFResult *r);
+MSF_API const Source *msf_source(const MSFResult *r);
 
 /**
  * @brief Returns the token array (for dump functions and iteration).
  * @param r  Analysis result.
  * @return   Pointer to the first token.  Owned by r; valid until msf_result_free().
  */
-const Token *msf_tokens(const MSFResult *r);
+MSF_API const Token *msf_tokens(const MSFResult *r);
 
 /**
  * @brief Returns the number of tokens in the token array.
  * @param r  Analysis result.
  * @return   Token count (always >= 1 — at minimum TOK_EOF).
  */
-size_t msf_token_count(const MSFResult *r);
+MSF_API size_t msf_token_count(const MSFResult *r);
 
 /* ┌──────────────────────────────────────────────────────────────────────────┐
  * │  7. ERRORS — what went wrong                                             │
@@ -1278,7 +1443,7 @@ size_t msf_token_count(const MSFResult *r);
  * @param r  Analysis result.
  * @return   Error count (0 means success).
  */
-uint32_t msf_error_count(const MSFResult *r);
+MSF_API uint32_t msf_error_count(const MSFResult *r);
 
 /**
  * @brief Returns the error message at the given index.
@@ -1286,7 +1451,7 @@ uint32_t msf_error_count(const MSFResult *r);
  * @param i  0-based error index.
  * @return   NUL-terminated message (valid for the lifetime of r).
  */
-const char *msf_error_message(const MSFResult *r, uint32_t i);
+MSF_API const char *msf_error_message(const MSFResult *r, uint32_t i);
 
 /**
  * @brief Returns the 1-based line number for an error.
@@ -1294,7 +1459,7 @@ const char *msf_error_message(const MSFResult *r, uint32_t i);
  * @param i  0-based error index.
  * @return   Line number, or 0 if index is out of range.
  */
-uint32_t msf_error_line(const MSFResult *r, uint32_t i);
+MSF_API uint32_t msf_error_line(const MSFResult *r, uint32_t i);
 
 /**
  * @brief Returns the 1-based column number for an error.
@@ -1302,7 +1467,7 @@ uint32_t msf_error_line(const MSFResult *r, uint32_t i);
  * @param i  0-based error index.
  * @return   Column number, or 0 if index is out of range.
  */
-uint32_t msf_error_col(const MSFResult *r, uint32_t i);
+MSF_API uint32_t msf_error_col(const MSFResult *r, uint32_t i);
 
 /**
  * @brief Returns the source byte offset where the error starts (inclusive).
@@ -1315,7 +1480,7 @@ uint32_t msf_error_col(const MSFResult *r, uint32_t i);
  * @param i  0-based error index.
  * @return   Byte offset, or 0 if index is out of range.
  */
-uint32_t msf_error_start_offset(const MSFResult *r, uint32_t i);
+MSF_API uint32_t msf_error_start_offset(const MSFResult *r, uint32_t i);
 
 /**
  * @brief Returns the source byte offset where the error ends (exclusive).
@@ -1323,7 +1488,7 @@ uint32_t msf_error_start_offset(const MSFResult *r, uint32_t i);
  * @param i  0-based error index.
  * @return   Byte offset, or 0 if index is out of range.
  */
-uint32_t msf_error_end_offset(const MSFResult *r, uint32_t i);
+MSF_API uint32_t msf_error_end_offset(const MSFResult *r, uint32_t i);
 
 /* ┌──────────────────────────────────────────────────────────────────────────┐
  * │  8. DUMP — serialize the AST                                             │
@@ -1338,21 +1503,36 @@ uint32_t msf_error_end_offset(const MSFResult *r, uint32_t i);
  * @param r    Analysis result.
  * @param out  Output stream (e.g. stdout).
  */
-void msf_dump_text(const MSFResult *r, FILE *out);
+MSF_API void msf_dump_text(const MSFResult *r, FILE *out);
 
 /**
  * @brief Dumps the AST as JSON (for editors, visualizers, web UIs).
  * @param r    Analysis result.
  * @param out  Output stream.
  */
-void msf_dump_json(const MSFResult *r, FILE *out);
+MSF_API void msf_dump_json(const MSFResult *r, FILE *out);
 
 /**
  * @brief Dumps the AST as an S-expression (for testing and diffing).
  * @param r    Analysis result.
  * @param out  Output stream.
  */
-void msf_dump_sexpr(const MSFResult *r, FILE *out);
+MSF_API void msf_dump_sexpr(const MSFResult *r, FILE *out);
+
+/* — String-returning variants (for editors, WASM/browser, and FFI bindings,
+ *   where a FILE* sink is awkward or unavailable). ------------------------- */
+
+/**
+ * @brief Renders the AST dump to a heap string instead of a FILE*.
+ * @param r  Analysis result.
+ * @return   Heap-allocated NUL-terminated string (free with msf_free()), or
+ *           NULL if @p r is NULL or on allocation failure.
+ * @{
+ */
+MSF_API char *msf_dump_text_string(const MSFResult *r);
+MSF_API char *msf_dump_json_string(const MSFResult *r);
+MSF_API char *msf_dump_sexpr_string(const MSFResult *r);
+/** @} */
 
 /* ═════════════════════════════════════════════════════════════════════════
  *
@@ -1375,12 +1555,21 @@ void msf_dump_sexpr(const MSFResult *r, FILE *out);
  * │  9. MODIFIER BITS — ASTNode.modifiers bitmask                          │
  * └──────────────────────────────────────────────────────────────────────────┘
  *
- *  uint32_t mods = node->modifiers;
+ *  uint64_t mods = node->modifiers;
  *  if (mods & MOD_STATIC) { ... }
+ *
+ *  ASTNode.modifiers is a uint64_t.  Bits 0-31 are the original 32-bit layout;
+ *  bits 32+ hold modifiers that would otherwise collide.  Use `1ull << n` for
+ *  the high bits.
  *
  *  Some bits are reused across unrelated node kinds (e.g. bit 22 is
  *  MOD_TESTABLE_IMPORT on AST_IMPORT_DECL but MOD_CAPTURE_WEAK on
- *  AST_CLOSURE_CAPTURE).  Always qualify by node->kind.
+ *  AST_CLOSURE_CAPTURE).  Always qualify by node->kind.  Such reuse is only
+ *  safe between node kinds that never co-occur; modifiers that CAN appear on
+ *  the same node (e.g. `package init!` carries both an access modifier and the
+ *  implicitly-unwrapped marker) must have distinct bits — which is why
+ *  MOD_IMPLICITLY_UNWRAPPED_FAILABLE lives at bit 32 rather than sharing bit 30
+ *  with MOD_PACKAGE.
  */
 
 /* — Access control -------------------------------------------------------- */
@@ -1420,7 +1609,10 @@ void msf_dump_sexpr(const MSFResult *r, FILE *out);
 
 /* — Initializer modifiers ------------------------------------------------- */
 #define MOD_FAILABLE                      (1u << 29)
-#define MOD_IMPLICITLY_UNWRAPPED_FAILABLE (1u << 30)
+/* Bit 32 (not 30): MOD_PACKAGE owns bit 30, and an initializer can be BOTH
+ * package-access and implicitly-unwrapped-failable (`package init!`), so these
+ * must not share a bit.  Requires the uint64_t modifiers field. */
+#define MOD_IMPLICITLY_UNWRAPPED_FAILABLE (1ull << 32)
 #define MOD_SUPPRESSED_CONFORMANCE        (1u << 31)
 
 /* — Import ---------------------------------------------------------------- */
@@ -1472,16 +1664,16 @@ typedef struct TypeArena {
 } TypeArena;
 
 /** @brief Initializes the arena with one empty chunk. */
-void      type_arena_init(TypeArena *a, size_t capacity);
+MSF_API void      type_arena_init(TypeArena *a, size_t capacity);
 
 /** @brief Frees all chunks and heap-allocated sub-arrays inside types. */
-void      type_arena_free(TypeArena *a);
+MSF_API void      type_arena_free(TypeArena *a);
 
 /** @brief Allocates a zeroed TypeInfo.  Returns NULL on OOM. */
-TypeInfo *type_arena_alloc(TypeArena *a);
+MSF_API TypeInfo *type_arena_alloc(TypeArena *a);
 
 /** @brief Initializes all TY_BUILTIN_* singletons from the arena. */
-void      type_builtins_init(TypeArena *a);
+MSF_API void      type_builtins_init(TypeArena *a);
 
 /* ┌──────────────────────────────────────────────────────────────────────────┐
  * │  11. TYPE CONSTRAINTS — generic where-clause requirements              │
@@ -1535,11 +1727,11 @@ typedef struct {
 } TypeSubstitution;
 
 /** @brief Adds or overwrites a (param → concrete) mapping. */
-void      type_sub_set(TypeSubstitution *sub, const char *param,
+MSF_API void      type_sub_set(TypeSubstitution *sub, const char *param,
                        TypeInfo *concrete);
 
 /** @brief Looks up a concrete type for a param name.  Returns NULL if absent. */
-TypeInfo *type_sub_lookup(const TypeSubstitution *sub, const char *param_name);
+MSF_API TypeInfo *type_sub_lookup(const TypeSubstitution *sub, const char *param_name);
 
 /**
  * @brief Recursively replaces generic params with concrete types.
@@ -1547,7 +1739,7 @@ TypeInfo *type_sub_lookup(const TypeSubstitution *sub, const char *param_name);
  * Non-destructive: returns the original pointer if nothing changes.
  * Allocates new TypeInfo from @p arena only when substitution applies.
  */
-TypeInfo *type_substitute(const TypeInfo *ty, const TypeSubstitution *sub,
+MSF_API TypeInfo *type_substitute(const TypeInfo *ty, const TypeSubstitution *sub,
                           TypeArena *arena);
 
 /* ┌──────────────────────────────────────────────────────────────────────────┐
@@ -1620,27 +1812,38 @@ typedef struct ConformanceTable {
 } ConformanceTable;
 
 /** @brief Register all built-in Swift conformances (Int: Equatable, …). */
-void        conformance_table_init_builtins(ConformanceTable *ct);
+MSF_API void        conformance_table_init_builtins(ConformanceTable *ct);
 
 /** @brief Record an unconditional conformance. */
-void        conformance_table_add(ConformanceTable *ct, const char *type_name,
+MSF_API void        conformance_table_add(ConformanceTable *ct, const char *type_name,
                                   const char *protocol_name);
 
 /** @brief Record a conditional conformance (`extension X: P where T: Q`). */
-void        conformance_table_add_conditional(ConformanceTable *ct,
+MSF_API void        conformance_table_add_conditional(ConformanceTable *ct,
                                               const char *type_name,
                                               const char *protocol_name,
                                               const void *where_ast);
 
 /** @brief Return the where-clause for a recorded conformance, or NULL. */
-const void *conformance_table_get_where(const ConformanceTable *ct,
+MSF_API const void *conformance_table_get_where(const ConformanceTable *ct,
                                         const char *type_name,
                                         const char *protocol_name);
 
 /** @brief Non-zero if the (type, protocol) pair is recorded. */
-int         conformance_table_has(const ConformanceTable *ct,
+MSF_API int         conformance_table_has(const ConformanceTable *ct,
                                   const char *type_name,
                                   const char *protocol_name);
+
+/**
+ * @brief Releases the entries array and lookup index of a conformance table.
+ *
+ * Frees what the table allocated (records + index) and resets it to empty; the
+ * ConformanceTable struct itself is caller-owned and is NOT freed (matching the
+ * init/add/free split — pass a stack or embedded table by address).  The
+ * recorded type/protocol name strings are borrowed and are left untouched.
+ * Safe on a zeroed or already-freed table.
+ */
+MSF_API void        conformance_table_free(ConformanceTable *ct);
 
 /* ┌──────────────────────────────────────────────────────────────────────────┐
  * │  15. ASSOCIATED-TYPE TABLE — typealias bindings                        │
@@ -1666,15 +1869,23 @@ typedef struct {
   uint32_t          capacity;
 } AssocTypeTable;
 
-void        assoc_type_table_init(AssocTypeTable *at);
-void        assoc_type_table_add(AssocTypeTable *at, const char *type_name,
+MSF_API void        assoc_type_table_init(AssocTypeTable *at);
+MSF_API void        assoc_type_table_add(AssocTypeTable *at, const char *type_name,
                                  const char *protocol_name,
                                  const char *assoc_name,
                                  const char *concrete_type_name);
-const char *assoc_type_table_get(const AssocTypeTable *at,
+MSF_API const char *assoc_type_table_get(const AssocTypeTable *at,
                                  const char *type_name,
                                  const char *protocol_name,
                                  const char *assoc_name);
+
+/**
+ * @brief Releases the entries array of an associated-type table and resets it
+ *        to empty.  The struct itself is caller-owned and is NOT freed; the
+ *        bound name strings are borrowed and left untouched.  Safe on a zeroed
+ *        or already-freed table.
+ */
+MSF_API void        assoc_type_table_free(AssocTypeTable *at);
 
 /* ┌──────────────────────────────────────────────────────────────────────────┐
  * │  16. BARE EXPRESSIONS — re-parse expression strings                    │
@@ -1704,11 +1915,43 @@ const char *assoc_type_table_get(const AssocTypeTable *at,
  * @param r           Analyzed result providing the backing arena.
  * @param expr_text   NUL-terminated Swift expression.
  * @param out_tokens  If non-NULL, receives the token array for the
- *                    sub-expression.  Same lifetime as @p r.
+ *                    sub-expression.  The array is TOK_EOF-terminated (scan
+ *                    until tok.type == TOK_EOF — no separate count is needed).
+ *                    Same lifetime as @p r.
  * @return            Parsed expression node, or NULL on failure.
  */
-const ASTNode *msf_parse_expression(MSFResult *r, const char *expr_text,
+MSF_API const ASTNode *msf_parse_expression(MSFResult *r, const char *expr_text,
                                     const Token **out_tokens);
+
+/* ┌──────────────────────────────────────────────────────────────────────────┐
+ * │  MSF-PREFIXED ALIASES — namespace-safe spellings of the core types       │
+ * └──────────────────────────────────────────────────────────────────────────┘
+ *
+ * The original type names (Source, Token, Keyword, TypeInfo, ASTNode, ...) are
+ * short and generic, so they can collide when msf.h is included alongside other
+ * libraries.  These MSF*-prefixed aliases name the exact same types — use them
+ * in new code to stay namespace-safe.  The unprefixed names remain fully
+ * supported for source compatibility.
+ */
+typedef Source             MSFSource;
+typedef Token              MSFToken;
+typedef TokenType          MSFTokenType;
+typedef Keyword            MSFKeyword;
+typedef OpKind             MSFOpKind;
+typedef TokenStream        MSFTokenStream;
+typedef LexerDiagnostics   MSFLexerDiagnostics;
+typedef TypeInfo           MSFTypeInfo;
+typedef TypeKind           MSFTypeKind;
+typedef TypeConstraint     MSFTypeConstraint;
+typedef TypeConstraintKind MSFTypeConstraintKind;
+typedef TypeArena          MSFTypeArena;
+typedef TypeSubstitution   MSFTypeSubstitution;
+typedef ASTNode            MSFASTNode;
+typedef ASTNodeKind        MSFASTNodeKind;
+typedef ConformanceTable   MSFConformanceTable;
+typedef ConformanceRecord  MSFConformanceRecord;
+typedef AssocTypeTable     MSFAssocTypeTable;
+typedef AssocTypeBinding   MSFAssocTypeBinding;
 
 #ifdef __cplusplus
 }

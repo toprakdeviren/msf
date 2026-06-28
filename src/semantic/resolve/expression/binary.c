@@ -9,9 +9,6 @@
 #define RANGE_EXPR_POSTFIX (1u << 17)
 #define RANGE_EXPR_UNBOUNDED (1u << 18)
 
-/*
- */
-
 static TypeInfo *make_range_expr_type(SemaContext *ctx, const char *name) {
   TypeInfo *t = type_arena_alloc(ctx->type_arena);
   if (!t)

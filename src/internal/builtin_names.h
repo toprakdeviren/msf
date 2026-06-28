@@ -219,7 +219,7 @@
 #define BN_DATA_EQUAL          "__data_equal"
 #define BN_FM_CURRENT_DIRECTORY "__fm_current_directory"
 #define BN_FM_FILE_EXISTS       "__fm_file_exists"
-#define BN_FM_CREATE_DIRECTORY  "__fm_create_directory"
+#define BN_FM_INIT_DIRECTORY    "__fm_init_directory"
 #define BN_FM_REMOVE_ITEM       "__fm_remove_item"
 #define BN_FM_CONTENTS          "__fm_contents"
 
@@ -444,7 +444,7 @@ typedef enum {
   BUILTIN_DATA_EQUAL,
   BUILTIN_FM_CURRENT_DIRECTORY,
   BUILTIN_FM_FILE_EXISTS,
-  BUILTIN_FM_CREATE_DIRECTORY,
+  BUILTIN_FM_INIT_DIRECTORY,
   BUILTIN_FM_REMOVE_ITEM,
   BUILTIN_FM_CONTENTS,
 
@@ -784,7 +784,7 @@ static inline BuiltinID resolve_builtin_id(const char *raw_name) {
   if (strcmp(n, BN_DATA_EQUAL)          == 0) return BUILTIN_DATA_EQUAL;
   if (strcmp(n, BN_FM_CURRENT_DIRECTORY) == 0) return BUILTIN_FM_CURRENT_DIRECTORY;
   if (strcmp(n, BN_FM_FILE_EXISTS)       == 0) return BUILTIN_FM_FILE_EXISTS;
-  if (strcmp(n, BN_FM_CREATE_DIRECTORY)  == 0) return BUILTIN_FM_CREATE_DIRECTORY;
+  if (strcmp(n, BN_FM_INIT_DIRECTORY)    == 0) return BUILTIN_FM_INIT_DIRECTORY;
   if (strcmp(n, BN_FM_REMOVE_ITEM)       == 0) return BUILTIN_FM_REMOVE_ITEM;
   if (strcmp(n, BN_FM_CONTENTS)          == 0) return BUILTIN_FM_CONTENTS;
 

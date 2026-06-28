@@ -15,8 +15,8 @@
 /* ═══════════════════════════════════════════════════════════════════════════════
  * Keyword Detection
  *
- * FNV-1a hash + 2-probe open addressing + 16-byte memcmp.
- * Clang -O2: FIRST reject ~95%, memcmp = single vmovdqu + vpcmpeqb (SSE4.2).
+ * Binary search over the sorted LEX_KEYWORDS[] table.  Keyword length
+ * (2..16 bytes) is checked first, so each probe is a single bounded memcmp.
  * ═══════════════════════════════════════════════════════════════════════════════ */
 
 /**

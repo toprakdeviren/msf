@@ -1123,10 +1123,10 @@ static void harvest_source_tree(MSFVocab *v, const char *mod, const char *dir,
 }
 
 /* Carthage prebuilt frameworks live at Carthage/Build/<platform>/<Name>.framework.
- * Harvest each framework's public ObjC headers (Headers/*.h) and, when present,
- * its textual Swift module interface (Modules/<Name>.swiftmodule/*.swiftinterface)
- * into vocab module <Name>.  The same framework is built per-platform; the vocab
- * dedups by name, so harvesting every slice is harmless. */
+ * Harvest each framework's public ObjC headers (the *.h files under Headers/) and,
+ * when present, its textual Swift module interface (the *.swiftinterface files under
+ * Modules/<Name>.swiftmodule/) into vocab module <Name>.  The same framework is
+ * built per-platform; the vocab dedups by name, so harvesting every slice is harmless. */
 static void harvest_carthage_build(MSFVocab *v, const char *build_dir,
                                    size_t *count) {
   DIR *d = opendir(build_dir);

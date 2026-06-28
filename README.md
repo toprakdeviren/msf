@@ -32,7 +32,7 @@ Source code
                               Typed AST
 ```
 
-**Lexer** — Tokenizes Swift source into keywords, identifiers, literals, operators. SWAR fast-path for ASCII identifiers, memchr-based SIMD string scanning, FNV-1a keyword detection via binary search.
+**Lexer** — Tokenizes Swift source into keywords, identifiers, literals, operators. SWAR fast-path for ASCII identifiers, memchr-based SIMD string scanning, binary-search keyword detection (sorted table, O(log 67)).
 
 **Parser** — Recursive descent with Pratt precedence climbing for expressions. Produces an immutable AST. Handles the full Swift grammar: generics, closures, pattern matching, custom operators, `async`/`await`, property wrappers.
 
@@ -315,4 +315,4 @@ data/                   AST node definitions
 
 ## License
 
-MIT
+Released under the [MIT License](LICENSE).

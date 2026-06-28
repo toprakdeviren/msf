@@ -81,30 +81,34 @@ Lexer, kaynak kodu **karakter karakter** okur ve anlamli parcalara boler. Parser
 
 ## Kod Yapisi
 
-Lexer 7 dosyadan olusur. Her dosya tek bir is yapar:
+Lexer birkac kucuk dosyaya bolunmustur. Her dosya tek bir is yapar:
 
 ```
 src/lexer/
-  lexer_private.h  (109 satir) -- dosyalar arasi paylasilan macro ve bildirimler
-  lexer.c          (165 satir) -- giris noktasi: init, next, tokenize
-  scan_comment.c   ( 77 satir) -- // ve /* */ tarayicilari
-  scan_string.c    (194 satir) -- "...", """...""", #"..."# tarayicilari
-  scan_symbol.c    (102 satir) -- operator, regex, noktalama tarayicisi
-  helpers.c        ( 96 satir) -- tablolar ve yardimci fonksiyonlar
-  diag.c           ( 85 satir) -- hata kayit mekanizmasi
-  token.c          (126 satir) -- token tipi adlari, metin cikarma, stream yonetimi
+  private.h        -- dosyalar arasi paylasilan macro ve bildirimler
+  lexer.c          -- giris noktasi: init, next, tokenize
+  token.c          -- token tipi adlari, metin cikarma, stream yonetimi
+  helpers.c        -- cok-karakterli operator tablosu, string token yardimcilari
+  diag.c           -- hata kayit mekanizmasi
+  char_tables.h    -- karakter siniflandirma + anahtar kelime tablolari
+  unicode_ranges.h -- Unicode tanimlayici/operator aralik tablolari
+  scan/
+    comment.c      -- // ve /* */ tarayicilari
+    string.c       -- "...", """...""", #"..."# tarayicilari
+    symbol.c       -- operator, regex, noktalama dispatch
+    fast.c         -- SWAR ident tarama, sayi tarama, string govde tarama
 ```
 
-**Neden 7 dosya?** Cunku lexer ilk basta 800 satirlik tek bir dosyaydi. Her seyi ayni yere koymak "bul ve duzelt" yaklasimini zorlastiriyordu. Simdi her dosyanin adina bakarak ne yaptigini anlayabilirsin.
+**Neden bu kadar dosya?** Cunku lexer ilk basta tek bir buyuk dosyaydi. Her seyi ayni yere koymak "bul ve duzelt" yaklasimini zorlastiriyordu. Simdi her dosyanin adina bakarak ne yaptigini anlayabilirsin.
 
 Veri akisi:
 
 ```
 lexer.c  (dispatch)
   |
-  +--- scan_comment.c  (// ve /* */)
-  +--- scan_string.c   ("...", """...""", #"..."#)
-  +--- scan_symbol.c   (operatorler, regex, noktalama)
+  +--- scan/comment.c  (// ve /* */)
+  +--- scan/string.c   ("...", """...""", #"..."#)
+  +--- scan/symbol.c   (operatorler, regex, noktalama)
   |
   +--- helpers.c       (hepsi kullanir)
   +--- diag.c          (hepsi kullanir)
@@ -141,7 +145,7 @@ typedef struct {
 
 ## Dosya Dosya Anlatim
 
-### 1. `lexer_private.h` -- Ortak Altyapi
+### 1. `private.h` -- Ortak Altyapi
 
 Bu dosya disariya acilmaz (public header degil). Lexer'in .c dosyalari arasinda paylasilan her sey burada:
 
@@ -200,9 +204,9 @@ uint8_t act = LEX_ACTION[cls];       // sinif -> aksiyon (0-4)
 | 0 | `CC_WHITESPACE` | Bitisik bosluklari yut, `TOK_WHITESPACE` |
 | 1 | Harf/`_`/`$`/Unicode | `scan_ident()` + keyword lookup |
 | 2 | Rakam | `scan_number()` |
-| 3 | `"` veya `'` | `scan_string()` -> scan_string.c |
-| -- | `#` | `scan_raw_string()` -> scan_string.c |
-| 4 | Diger | `scan_symbol()` -> scan_symbol.c |
+| 3 | `"` veya `'` | `scan_string()` -> scan/string.c |
+| -- | `#` | `scan_raw_string()` -> scan/string.c |
+| 4 | Diger | `scan_symbol()` -> scan/symbol.c |
 
 **Neden table-driven?** 256-byte lookup tablosu CPU cache'ine sigar. Her karakter siniflandirma O(1). `if (c >= 'a' && c <= 'z' || c >= 'A' ...)` zincirinden cok daha hizli.
 
@@ -215,7 +219,7 @@ uint8_t act = LEX_ACTION[cls];       // sinif -> aksiyon (0-4)
 
 ---
 
-### 3. `scan_comment.c` -- Yorum Tarayicilari
+### 3. `scan/comment.c` -- Yorum Tarayicilari
 
 Iki fonksiyon, iki yorum stili:
 
@@ -246,7 +250,7 @@ Ic ice destek neden onemli? Cunku kod bloklarini yorum icine alirken o blokta za
 
 ---
 
-### 4. `scan_string.c` -- String Tarayicilari
+### 4. `scan/string.c` -- String Tarayicilari
 
 Swift'in en karmasik token turleri buradadir. 4 cesit string var:
 
@@ -287,15 +291,15 @@ Eger `#` dan sonra `"` gelmezse, bu raw string degildir -- sifir uzunluklu senti
 
 ---
 
-### 5. `scan_symbol.c` -- Operator ve Noktalama
+### 5. `scan/symbol.c` -- Operator ve Noktalama
 
 Bu dosya "geri kalan her sey" icin catch-all dispatcher:
 
 **`scan_symbol()`** -- Dispatch sirasi (ilk eslesme kazanir):
 
 ```
-1. "//" -> scan_line_comment()  (scan_comment.c'ye delege)
-2. "/*" -> scan_block_comment() (scan_comment.c'ye delege)
+1. "//" -> scan_line_comment()  (scan/comment.c'ye delege)
+2. "/*" -> scan_block_comment() (scan/comment.c'ye delege)
 3. Multi-char operator? -> MULTI_OPS[] tablosunu tara
 4. "/" + non-delimiter? -> scan_regex_literal() dene
 5. Tek karakter -> SW_CHAR_TOKEN[] tablosuna bak

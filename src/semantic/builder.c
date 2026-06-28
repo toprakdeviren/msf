@@ -101,7 +101,6 @@ uint32_t builder_method_name_tok(const SemaContext *ctx, const BuilderEntry *be,
   const Token  *toks = be->tokens ? be->tokens : ctx->tokens;
   const Source *bsrc = be->src    ? be->src    : ctx->src;
   uint32_t      ntok = be->tokens ? be->token_count : ctx->token_count;
-  (void)ctx;
   for (const ASTNode *bm = bbody->first_child; bm; bm = bm->next_sibling) {
     if (bm->kind != AST_FUNC_DECL)
       continue;

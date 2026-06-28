@@ -166,7 +166,7 @@ const char *ast_kind_name(ASTNodeKind k) {
 }
 ```
 
-Bu tablo `data/ast_nodes.def` dosyasından `make codegen` ile otomatik üretilir.
+Bu tablo `data/ast_nodes.def` dosyasından otomatik üretilir (kod üretim araçları proje bakımına özeldir, repoda yer almaz).
 
 ---
 

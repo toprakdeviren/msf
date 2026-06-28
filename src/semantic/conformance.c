@@ -144,7 +144,7 @@ int check_conformance(const ASTNode *type_decl, const ASTNode *proto_decl,
                       SemaContext *ctx, const ASTNode *ast_root);
 
 /* ═══════════════════════════════════════════════════════════════════════════════
- * Sendable inference (Tier 2.2)
+ * Sendable inference
  * ═══════════════════════════════════════════════════════════════════════════════
  * Value types (struct/enum) are Sendable when every stored property's type is
  * Sendable. This helper answers the question for any TypeInfo by consulting
@@ -360,18 +360,6 @@ void check_sendable_closures(SemaContext *ctx, const ASTNode *root) {
  *   3. If the member's return type doesn't fit existing BMResult values,
  *      add a new BMR_xxx to the BMResult enum above and handle it in
  *      bmr_to_type() below
- *
- * Entry counts per type:
- *   Array:     29 entries (7 props + 22 methods)
- *   Optional:   2 entries (map, flatMap)
- *   String:    29 entries (11 props + 18 methods)
- *   Int:        3 entries (description, advanced, distance)
- *   Dict:       5 entries (count, keys, values, isEmpty, first)
- *   Set:       13 entries (2 props + 11 methods)
- *   Character: 13 entries (11 props + 2 methods)
- *   Hashable:   4 entries (hashValue stubs)
- *
- * Total: ~97 entries
  */
 static const BuiltinMemberEntry BUILTIN_MEMBERS[] = {
     /* ── Array properties ───────────────────────────────────────────────────── */
@@ -435,13 +423,15 @@ static const BuiltinMemberEntry BUILTIN_MEMBERS[] = {
 
     /* ── String properties ──────────────────────────────────────────────────── */
     {BMK_STRING, "count", BMR_INT},
-    {BMK_STRING, "utf8", BMR_INT},
+    /* utf8/utf16 return collection views in Swift; lowered to Int here
+       since only their .count is typically accessed in this type system. */
+    {BMK_STRING, "utf8",  BMR_INT},
     {BMK_STRING, "utf16", BMR_INT},
     {BMK_STRING, "utf8Count", BMR_INT},
     {BMK_STRING, "startIndex", BMR_INT},
     {BMK_STRING, "endIndex", BMR_INT},
-    /* View is lowered as String in IR; must not be Int or print() treats .count
-       as ptr. */
+    /* unicodeScalars returns a UnicodeScalarView; lowered to String here
+       so member access (e.g. .count) resolves correctly. */
     {BMK_STRING, "unicodeScalars", BMR_STRING},
     {BMK_STRING, "isEmpty", BMR_BOOL},
     {BMK_STRING, "lowercased", BMR_STRING},
@@ -548,7 +538,9 @@ static const BuiltinMemberEntry BUILTIN_MEMBERS[] = {
     {BMK_BOOL, "hashValue", BMR_INT},
     {BMK_DOUBLE, "hashValue", BMR_INT},
 
-    /* ── Date (typed as Double) components ──────────────────────────────────── */
+    /* ── Date: Foundation's Date is lowered to Double in this type system.
+       These members model the calendar-component accessors from DateComponents,
+       mapped onto the Double representation for basic date arithmetic. ──────── */
     {BMK_DOUBLE, "year", BMR_INT},
     {BMK_DOUBLE, "month", BMR_INT},
     {BMK_DOUBLE, "day", BMR_INT},

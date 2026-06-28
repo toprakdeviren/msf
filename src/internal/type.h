@@ -17,7 +17,6 @@
  *
  *   TypeArena arena;
  *   type_arena_init(&arena, 0);
- *   type_builtins_init(&arena);    // sets TY_BUILTIN_INT, etc.
  *
  *   TypeInfo *ti = type_arena_alloc(&arena);
  *   ti->kind = TY_ARRAY;

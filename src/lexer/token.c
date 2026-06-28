@@ -71,6 +71,26 @@ const char *token_text(const Source *src, const Token *tok) {
   return _txt_buf;
 }
 
+/**
+ * @brief Zero-copy view of a token's text — points into the source, no buffer,
+ *        no allocation, fully reentrant (preferred over token_text()).
+ */
+MSFStringView msf_token_view(const Source *src, const Token *tok) {
+  if (!src || !tok) return (MSFStringView){NULL, 0};
+  return (MSFStringView){src->data + tok->pos, tok->len};
+}
+
+/** @brief First byte of the token's text within the source (NOT NUL-terminated;
+ *  read exactly msf_token_length() bytes).  NULL if either argument is NULL. */
+const char *msf_token_text(const Source *src, const Token *tok) {
+  return (src && tok) ? src->data + tok->pos : NULL;
+}
+
+/** @brief Byte length of a token (0 if @p tok is NULL). */
+size_t msf_token_length(const Token *tok) {
+  return tok ? tok->len : 0;
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════════
  * Token Stream Management
  * ═══════════════════════════════════════════════════════════════════════════════ */

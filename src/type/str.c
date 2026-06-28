@@ -34,7 +34,7 @@ const char *type_to_string(const TypeInfo *t, char *buf, size_t sz) {
     return buf;
   }
   switch (t->kind) {
-    /* @generated primitive cases (scripts/codegen.py) */
+    /* @generated primitive cases */
   case TY_VOID:        snprintf(buf, sz, "Void"); break;
   case TY_BOOL:        snprintf(buf, sz, "Bool"); break;
   case TY_INT:         snprintf(buf, sz, "Int"); break;

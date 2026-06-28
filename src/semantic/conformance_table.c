@@ -193,6 +193,17 @@ int conformance_table_has(const ConformanceTable *ct, const char *type_name,
   return 0;
 }
 
+/** @brief Frees the entries array + lookup index; resets the table to empty.
+ *  The struct itself is caller-owned (not freed); name strings are borrowed. */
+void conformance_table_free(ConformanceTable *ct) {
+  if (!ct) return;
+  conformance_index_free(ct);        /* frees ct->index, sets it to NULL */
+  free(ct->entries);
+  ct->entries = NULL;
+  ct->count = 0;
+  ct->capacity = 0;
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════════
  * Associated Type Table
  * ═══════════════════════════════════════════════════════════════════════════════ */
@@ -242,6 +253,16 @@ const char *assoc_type_table_get(const AssocTypeTable *at,
       return at->entries[i].concrete_type_name;
   }
   return NULL;
+}
+
+/** @brief Frees the entries array and resets the table to empty.  The struct
+ *  itself is caller-owned (not freed); bound name strings are borrowed. */
+void assoc_type_table_free(AssocTypeTable *at) {
+  if (!at) return;
+  free(at->entries);
+  at->entries = NULL;
+  at->count = 0;
+  at->capacity = 0;
 }
 
 /**

@@ -33,7 +33,7 @@
 
 #define MSF_BUILTIN_DEF(NAME, KIND) \
   static TypeInfo _msf_builtin_##NAME = { .kind = (KIND) }; \
-  TypeInfo *TY_BUILTIN_##NAME = &_msf_builtin_##NAME
+  MSF_API TypeInfo *TY_BUILTIN_##NAME = &_msf_builtin_##NAME
 
 MSF_BUILTIN_DEF(VOID,        TY_VOID);
 MSF_BUILTIN_DEF(BOOL,        TY_BOOL);

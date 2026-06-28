@@ -1,7 +1,7 @@
 # What Is Semantic Analysis and How Does It Work?
 
 > This document explains the semantic analysis (sema) layer of msf from the ground up.
-> Previous chapters: [01 -- Lexer](01-lexer.md), [02 -- AST](02-ast.md), [03 -- Parser](03-how-the-parser-works.md), [04 -- Type System](04-type-system.md)
+> Previous chapters: [01 -- Lexer](01-lexer.md), [02 -- AST](02-ast.md), [03 -- Parser](03-parser.md), [04 -- Type System](04-type-system.md)
 
 ## What Does Sema Do?
 

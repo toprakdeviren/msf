@@ -83,3 +83,34 @@ void lexer_diag_push(LexerDiagnostics *d, uint32_t line, uint32_t col,
   vsnprintf(d->message[i], sizeof(d->message[i]), fmt, ap);
   va_end(ap);
 }
+
+/* ─── Public lifecycle + read accessors ──────────────────────────────────────
+ * LexerDiagnostics is opaque to public-API consumers (the struct lives in this
+ * module's internal headers), so they allocate one with lexer_diagnostics_new()
+ * and read it back through these accessors rather than touching the fields. */
+
+LexerDiagnostics *lexer_diagnostics_new(void) {
+  LexerDiagnostics *d = malloc(sizeof(*d));
+  if (d) lexer_diag_init(d);
+  return d;
+}
+
+void lexer_diagnostics_free(LexerDiagnostics *d) {
+  free(d);
+}
+
+size_t lexer_diagnostic_count(const LexerDiagnostics *d) {
+  return d ? d->count : 0;
+}
+
+const char *lexer_diagnostic_message(const LexerDiagnostics *d, size_t i) {
+  return (d && i < d->count) ? d->message[i] : NULL;
+}
+
+uint32_t lexer_diagnostic_line(const LexerDiagnostics *d, size_t i) {
+  return (d && i < d->count) ? d->line[i] : 0;
+}
+
+uint32_t lexer_diagnostic_col(const LexerDiagnostics *d, size_t i) {
+  return (d && i < d->count) ? d->col[i] : 0;
+}

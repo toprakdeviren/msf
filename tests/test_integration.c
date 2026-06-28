@@ -64,12 +64,7 @@ static int count_kind(const ASTNode *n, ASTNodeKind k) {
   return c;
 }
 
-static const ASTNode *nth_child(const ASTNode *n, int idx) {
-  int i = 0;
-  for (const ASTNode *c = n->first_child; c; c = c->next_sibling)
-    if (i++ == idx) return c;
-  return NULL;
-}
+
 
 /* ═══════════════════════════════════════════════════════════════════════════
  *  1. Complete Programs

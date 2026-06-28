@@ -67,7 +67,7 @@ Parser 14 dosyadan olusur. Her dosya tek bir is yapar:
 
 ```
 src/parser/
-  internal.h          (256 satir) -- Parser struct, inline helpers, tum prototipler
+  private.h           (386 satir) -- Parser struct, inline helpers, tum prototipler
   core.c              (544 satir) -- giris noktasi: adv, alloc_node, error, modifiers
   top.c               (338 satir) -- parse_decl_stmt: ust seviye dispatch
   stmt.c              (486 satir) -- if, for, while, switch, guard, return, ...
@@ -127,7 +127,7 @@ p_is_op(p, OP_ARROW) // "->" operatoru mu?
 cur_char(p)          // simdiki token'in ilk byte'i
 ```
 
-Bunlarin hepsi `internal.h`'de inline olarak tanimli. Her cagri O(1).
+Bunlarin hepsi `private.h`'de inline olarak tanimli. Her cagri O(1).
 
 ### 2. Node Allocation (core.c)
 

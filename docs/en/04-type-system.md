@@ -1,7 +1,7 @@
 # What Is the Type System and How Does It Work?
 
 > This document explains MiniSwiftFrontend's type module from scratch.
-> Previous chapters: [01 — Lexer](01-what-is-a-lexer.md), [02 — AST](02-what-is-an-ast.md), [03 — Parser](03-how-the-parser-works.md)
+> Previous chapters: [01 — Lexer](01-lexer.md), [02 — AST](02-ast.md), [03 — Parser](03-parser.md)
 
 ## What Does the Type Module Do?
 

@@ -49,8 +49,8 @@
 #include <string.h>
 
 /* The SDK module vocabulary compiled into the library (generated/sdk_vocab.h,
- * produced by `make sdk-vocab`).  Absent in a fresh tree → empty fallback so the
- * build still works; regenerate to embed real SDK types. */
+ * produced by maintainer-only tooling).  Absent in a fresh tree → empty fallback so the
+ * build still works; a maintainer build with the generated vocab embeds the real SDK types. */
 /* The WebAssembly playground build defines MSF_WEB_VOCAB and links the trimmed
  * hybrid vocab (all SDK type names + member signatures only for playground-core
  * modules — generated/sdk_vocab_web.h, ~3.7 MB vs ~13 MB).  Every other build

@@ -26,7 +26,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* @generated — keyword hash table (scripts/codegen.py) */
+/* Maps a raw keyword id (from keyword_detect) to the Keyword enum. */
 static inline Keyword map_kw_id(uint32_t kid) {
   if (kid == 0 || kid >= KW__COUNT) return KW_NONE;
   return (Keyword)kid;

@@ -178,6 +178,14 @@ int try_consume_setter_access(Parser *p, uint8_t access_value) {
   return 1;
 }
 
+/** @brief Tries setter-access, otherwise sets the modifier flag and advances. */
+static void consume_access_modifier(Parser *p, uint32_t *mods,
+                                    uint32_t mod_flag, uint8_t setter_val) {
+  if (try_consume_setter_access(p, setter_val)) return;
+  *mods |= mod_flag;
+  adv(p);
+}
+
 /**
  * @brief Collects modifier keywords into a MOD_* bitmask.
  *
@@ -192,14 +200,6 @@ int try_consume_setter_access(Parser *p, uint8_t access_value) {
  * @param p  Parser state.
  * @return   Accumulated modifier bitmask.
  */
-/** @brief Tries setter-access, otherwise sets the modifier flag and advances. */
-static void consume_access_modifier(Parser *p, uint32_t *mods,
-                                    uint32_t mod_flag, uint8_t setter_val) {
-  if (try_consume_setter_access(p, setter_val)) return;
-  *mods |= mod_flag;
-  adv(p);
-}
-
 uint32_t collect_modifiers(Parser *p) {
   uint32_t mods = 0;
   p->class_var_flag = 0;

@@ -7,13 +7,6 @@
 #include "../private.h"
 
 /*
- * sema_protocol_helpers.h — Protocol requirement helpers: protocol_req_*,
- * type_ast_*, infer_concrete_at_assoc, protocol_extension_has_default. Include
- * after sema_type_resolution.h (uses find_type_child). Used by
- * sema_resolve_node.h (check_conformance).
- */
-
-/*
  * True if protocol requirement is an associated type (associatedtype /
  * typealias)
  */

@@ -12,9 +12,23 @@
  *   msf_dump_text/json/sexpr()           — AST serialization
  */
 
+/* Expose open_memstream() (POSIX.1-2008) under -std=c11, which otherwise hides
+ * it.  These are additive "full default set" switches — they reveal extra
+ * functions without hiding any.  Must precede every #include.  Not needed on
+ * Windows (no open_memstream there — msf_dump_*_string falls back to tmpfile). */
+#if !defined(_WIN32)
+#  ifndef _DEFAULT_SOURCE
+#    define _DEFAULT_SOURCE 1   /* glibc / musl */
+#  endif
+#  if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#    define _DARWIN_C_SOURCE 1  /* Darwin   */
+#  endif
+#endif
+
 #include "internal/msf.h"
 #include "internal/lexer.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -65,21 +79,24 @@ const char *msf_version(void) {
  * are recorded and accessible via msf_error_*().  The AST is always
  * produced (best-effort recovery).
  */
-static MSFResult *analyze_impl(const char *code, const char *filename,
+static MSFResult *analyze_impl(const char *code, size_t code_len, const char *filename,
                                const char *const *module_types, size_t module_type_count,
                                const MSFVocab *vocab) {
   if (!code) return NULL;
+  /* Token/AST/error offsets are 32-bit; reject input that would overflow them. */
+  if (code_len > UINT32_MAX) return NULL;
 
   MSFResult *r = calloc(1, sizeof(MSFResult));
   if (!r) return NULL;
 
   /* Copy the source so the result owns its backing memory.  Tokens, AST
    * nodes, and diagnostics all reference into this buffer; the caller may
-   * free their input immediately after we return. */
-  size_t code_len = strlen(code);
+   * free their input immediately after we return.  @p code need not be
+   * NUL-terminated (length-based entry points), so terminate it ourselves. */
   r->src_buf = malloc(code_len + 1);
   if (!r->src_buf) { msf_result_free(r); return NULL; }
-  memcpy(r->src_buf, code, code_len + 1);
+  memcpy(r->src_buf, code, code_len);
+  r->src_buf[code_len] = '\0';
 
   const char *fname = filename ? filename : "<input>";
   size_t fname_len = strlen(fname);
@@ -129,17 +146,30 @@ static MSFResult *analyze_impl(const char *code, const char *filename,
 }
 
 MSFResult *msf_analyze(const char *code, const char *filename) {
-  return analyze_impl(code, filename, NULL, 0, NULL);
+  if (!code) return NULL;
+  return analyze_impl(code, strlen(code), filename, NULL, 0, NULL);
+}
+
+MSFResult *msf_analyze_bytes(const char *code, size_t len, const char *filename) {
+  return analyze_impl(code, len, filename, NULL, 0, NULL);
 }
 
 MSFResult *msf_analyze_in_module(const char *code, const char *filename,
                                  const char *const *module_types, size_t module_type_count) {
-  return analyze_impl(code, filename, module_types, module_type_count, NULL);
+  if (!code) return NULL;
+  return analyze_impl(code, strlen(code), filename, module_types, module_type_count, NULL);
 }
 
 MSFResult *msf_analyze_with_vocab(const char *code, const char *filename,
                                   const MSFVocab *vocab) {
-  return analyze_impl(code, filename, NULL, 0, vocab);
+  if (!code) return NULL;
+  return analyze_impl(code, strlen(code), filename, NULL, 0, vocab);
+}
+
+/** @brief Frees a heap buffer handed back by an msf_* function.  Routes through
+ *  the library's allocator so it is correct across CRT/allocator boundaries. */
+void msf_free(void *p) {
+  free(p);
 }
 
 /**
@@ -222,8 +252,10 @@ int msf_module_set_sdk_vocabulary(MSFModule *m, const MSFVocab *vocab) {
   return 0;
 }
 
-int msf_module_add_file(MSFModule *m, const char *code, const char *filename) {
+static int module_add_file_impl(MSFModule *m, const char *code, size_t code_len,
+                                const char *filename) {
   if (!m || !code || m->analyzed) return -1;
+  if (code_len > UINT32_MAX) return -1;  /* offsets are 32-bit */
 
   if (m->nfiles == m->cap) {
     size_t nc = m->cap ? m->cap * 2 : 8;
@@ -236,10 +268,10 @@ int msf_module_add_file(MSFModule *m, const char *code, const char *filename) {
   ModuleFile *f = &m->files[m->nfiles];
   memset(f, 0, sizeof(*f));
 
-  size_t code_len = strlen(code);
   f->src_buf = malloc(code_len + 1);
   if (!f->src_buf) return -1;
-  memcpy(f->src_buf, code, code_len + 1);
+  memcpy(f->src_buf, code, code_len);  /* @p code may not be NUL-terminated */
+  f->src_buf[code_len] = '\0';
 
   const char *fn = filename ? filename : "<input>";
   size_t fnl = strlen(fn);
@@ -269,6 +301,16 @@ int msf_module_add_file(MSFModule *m, const char *code, const char *filename) {
   f->root = parse_source_file(f->parser);
   m->nfiles++;
   return 0;
+}
+
+int msf_module_add_file(MSFModule *m, const char *code, const char *filename) {
+  if (!code) return -1;
+  return module_add_file_impl(m, code, strlen(code), filename);
+}
+
+int msf_module_add_file_bytes(MSFModule *m, const char *code, size_t len,
+                              const char *filename) {
+  return module_add_file_impl(m, code, len, filename);
 }
 
 int msf_module_analyze(MSFModule *m) {
@@ -582,3 +624,50 @@ void msf_dump_sexpr(const MSFResult *r, FILE *out) {
   if (!r || !r->root) return;
   ast_dump_sexpr(r->root, &r->src, r->ts.tokens, out ? out : stdout);
 }
+
+/* — String-returning variants ---------------------------------------------- *
+ * Capture a dumper's FILE* output into a heap string.  Uses open_memstream on
+ * POSIX (macOS, Linux, emscripten); falls back to a temp file on Windows, which
+ * lacks it.  Returns a malloc'd NUL-terminated string (free with msf_free()),
+ * or NULL on failure. */
+
+static void emit_text(const MSFResult *r, FILE *f) {
+  ast_print(r->root, &r->src, r->ts.tokens, 0, f);
+}
+static void emit_json(const MSFResult *r, FILE *f) {
+  ast_dump_json(r->root, &r->src, r->ts.tokens, f);
+}
+static void emit_sexpr(const MSFResult *r, FILE *f) {
+  ast_dump_sexpr(r->root, &r->src, r->ts.tokens, f);
+}
+
+static char *render_to_string(const MSFResult *r,
+                              void (*emit)(const MSFResult *, FILE *)) {
+  if (!r || !r->root) return NULL;
+#if defined(_WIN32)
+  FILE *f = tmpfile();
+  if (!f) return NULL;
+  emit(r, f);
+  long n = ftell(f);
+  if (n < 0) { fclose(f); return NULL; }
+  rewind(f);
+  char *buf = malloc((size_t)n + 1);
+  if (!buf) { fclose(f); return NULL; }
+  size_t rd = fread(buf, 1, (size_t)n, f);
+  buf[rd] = '\0';
+  fclose(f);
+  return buf;
+#else
+  char *buf = NULL;
+  size_t size = 0;
+  FILE *f = open_memstream(&buf, &size);
+  if (!f) return NULL;
+  emit(r, f);
+  if (fclose(f) != 0) { free(buf); return NULL; }
+  return buf;  /* NUL-terminated by open_memstream; caller frees via msf_free() */
+#endif
+}
+
+char *msf_dump_text_string(const MSFResult *r)  { return render_to_string(r, emit_text);  }
+char *msf_dump_json_string(const MSFResult *r)  { return render_to_string(r, emit_json);  }
+char *msf_dump_sexpr_string(const MSFResult *r) { return render_to_string(r, emit_sexpr); }
