@@ -232,6 +232,7 @@ static ASTNode *parse_enum_element(Parser *p) {
     ASTNode *val = parse_expr_pratt(p, 0);
     if (val) ast_add_child(elem, val);
   }
+  elem->tok_end = (uint32_t)p->pos;
   return elem;
 }
 
