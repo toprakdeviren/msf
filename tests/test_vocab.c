@@ -342,6 +342,36 @@ static void test_members_extract_and_roundtrip(void) {
   PASS();
 }
 
+static void test_enum_case_members(void) {
+  TEST("vocab: records enum cases as members");
+  const char *iface =
+      "public enum Tone {\n"
+      "  case low, high\n"
+      "  case level(Int)\n"
+      "  case mid = 3\n"
+      "}\n";
+  MSFVocab *v = msf_vocab_new();
+  ASSERT_NOT_NULL(v);
+  msf_vocab_add_interface(v, "Audio", iface);
+
+  ASSERT_EQ(msf_vocab_type_count(v, 0), (size_t)1);
+  ASSERT_EQ(msf_vocab_member_count(v, 0, 0), (size_t)4);
+  ASSERT_EQ(member_kind_of_sig(v, 0, 0, "low"), (int)MSF_VOCAB_MEMBER_CASE);
+  ASSERT_EQ(member_kind_of_sig(v, 0, 0, "high"), (int)MSF_VOCAB_MEMBER_CASE);
+  ASSERT_EQ(member_kind_of_sig(v, 0, 0, "level(Int)"),
+            (int)MSF_VOCAB_MEMBER_CASE);
+  ASSERT_EQ(member_kind_of_sig(v, 0, 0, "mid = 3"), (int)MSF_VOCAB_MEMBER_CASE);
+
+  char *text = msf_vocab_serialize(v);
+  ASSERT_NOT_NULL(text);
+  ASSERT(strstr(text, "\tc low") != NULL);
+  ASSERT(strstr(text, "\tc level(Int)") != NULL);
+
+  free(text);
+  msf_vocab_free(v);
+  PASS();
+}
+
 static void test_dependency_graph_and_closure(void) {
   TEST("vocab: import edges extracted + transitive closure (deps survive round-trip)");
   MSFVocab *v = msf_vocab_new();
@@ -577,6 +607,7 @@ void run_vocab_tests(void) {
   TEST_SUITE("Module Vocabulary");
   test_init_check_leniency();
   test_members_extract_and_roundtrip();
+  test_enum_case_members();
   test_dependency_graph_and_closure();
   test_vocab_member_resolution();
   test_vocab_method_call_resolution();
